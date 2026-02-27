@@ -47,9 +47,11 @@ func (s *Strategy) onPriceEMA(price float64, endTime time.Time) {
 
 	// ─── 每 tick 都计算全量指标，用于状态显示 + 信号生成 ───
 	er := 0.0
+	if s.cfg.ERPeriod > 0 {
+		er = calcER(s.prices, s.cfg.ERPeriod)
+	}
 	bbUpper, bbLower := 0.0, 0.0
 	if s.cfg.BBPeriod > 0 {
-		er = calcER(s.prices, s.cfg.ERPeriod)
 		bbUpper, _, bbLower = calcBollingerBands(s.prices, s.cfg.BBPeriod, s.cfg.BBStdDev)
 	}
 
@@ -63,6 +65,9 @@ func (s *Strategy) onPriceEMA(price float64, endTime time.Time) {
 		trendPos = "\033[31m↓趋\033[0m" // 价格在 trendEMA 下方（逆多/顺空）
 	}
 	bbTag := ""
+	if s.cfg.ERPeriod > 0 {
+		bbTag = fmt.Sprintf(" ER:%.2f", er)
+	}
 	if s.cfg.BBPeriod > 0 {
 		pricePos := "  中  "
 		if price <= bbLower {
@@ -171,22 +176,23 @@ func (s *Strategy) onPriceEMA(price float64, endTime time.Time) {
 					trendTag(price < trendEMA), bbUpper, er, erShortThresh, kVelPct*100)
 			}
 		} else if s.prevShortEMA > 0 && s.prevLongEMA > 0 {
-			// ─── 旧方案：EMA 金叉/死叉 + 动量过滤 + Kalman 速度确认 ───
+			// ─── 旧方案：EMA 金叉/死叉 + 动量/ER过滤 + Kalman 速度确认 ───
 			momentum := calcMomentum(s.prices, s.cfg.MomentumPeriod)
 			momOK := s.cfg.MomentumPeriod == 0
+			erOK := s.cfg.ERThreshold <= 0 || er > s.cfg.ERThreshold
 			switch {
 			case s.prevShortEMA <= s.prevLongEMA && noisyShortEMA > longEMA &&
-				rsi < s.cfg.RSILongMax &&
+				rsi < s.cfg.RSILongMax && erOK &&
 				(momOK || (price > trendEMA && momentum > s.cfg.MomentumThreshold) ||
 					(price <= trendEMA && momentum > s.cfg.MomentumThreshold*1.5)) && kVelLong:
 				s.p.openPos(s.cfg, dirLong, price, &s.trades)
-				signal = fmt.Sprintf("\033[32m金叉做多\033[0m (RSI:%.1f↑ 动量%+.3f%% K:%.4f%%)", rsi, momentum*100, kVelPct*100)
+				signal = fmt.Sprintf("\033[32m金叉做多\033[0m (ER:%.2f 动量%+.3f%% K:%.4f%%)", er, momentum*100, kVelPct*100)
 			case s.prevShortEMA >= s.prevLongEMA && noisyShortEMA < longEMA &&
-				rsi > s.cfg.RSIShortMin &&
+				rsi > s.cfg.RSIShortMin && erOK &&
 				(momOK || (price < trendEMA && momentum < -s.cfg.MomentumThreshold) ||
 					(price >= trendEMA && momentum < -s.cfg.MomentumThreshold*1.5)) && kVelShort:
 				s.p.openPos(s.cfg, dirShort, price, &s.trades)
-				signal = fmt.Sprintf("\033[31m死叉做空\033[0m (RSI:%.1f↓ 动量%+.3f%% K:%.4f%%)", rsi, momentum*100, kVelPct*100)
+				signal = fmt.Sprintf("\033[31m死叉做空\033[0m (ER:%.2f 动量%+.3f%% K:%.4f%%)", er, momentum*100, kVelPct*100)
 			}
 		}
 	}
@@ -226,6 +232,16 @@ func (s *Strategy) onPriceEMA(price float64, endTime time.Time) {
 					gapStr, rsi, s.cfg.RSIShortMin, ck(rsi > s.cfg.RSIShortMin),
 					er, erThresh, ck(er > erThresh), ck(kVelShort))
 			}
+		} else if !s.p.inPosition() && s.cfg.BBPeriod == 0 {
+			kDir := "↑多↓空"
+			if kVelPct > s.cfg.KalmanVelThresh {
+				kDir = "\033[32m↑充能\033[0m"
+			} else if kVelPct < -s.cfg.KalmanVelThresh {
+				kDir = "\033[31m↓泄能\033[0m"
+			}
+			erThresh := s.cfg.ERThreshold
+			signal = fmt.Sprintf("等金叉/死叉 ER:%.2f>%.2f%s K方向:%s",
+				er, erThresh, ck(er > erThresh), kDir)
 		} else if s.p.inPosition() {
 			// 持仓：显示止损/止盈/RSI平仓的触发价
 			pct := s.p.positionPct(price)
