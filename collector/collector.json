@@ -1,0 +1,8 @@
+{
+  "_doc": {
+    "sample_interval_sec": "采样间隔（秒）。直接修改此值并保存，采集器 3 秒内自动热重载，无需重启",
+    "data_dir":             "价格数据写入目录（相对于采集器运行目录）"
+  },
+  "sample_interval_sec": 5,
+  "data_dir": "data"
+}
