@@ -11,7 +11,7 @@ import (
 type Strategy struct {
 	cfg           Config
 	p             portfolio
-	prices        []float64
+	priceBuf      *RingBuffer
 	trades        []tradeRecord
 	prevShortEMA  float64
 	prevLongEMA   float64
@@ -20,8 +20,14 @@ type Strategy struct {
 	currentTarget float64     // trend_prob：本次开仓的初始目标权益收益率
 	openTime      time.Time   // trend_prob / squeeze_breakout：开仓时间
 	kf            kalmanFilter // 卡尔曼滤波器状态（每策略独立，跨 tick 持久化）
-	prevInSqueeze     bool // squeeze_breakout：上一 tick 是否处于挤压状态
-	dcbConsecutiveDown int  // dead_cat_bounce：反弹高点后连续下跌 tick 计数
+	prevInSqueeze bool         // squeeze_breakout：上一 tick 是否处于挤压状态
+	dcbConsecDown int          // dead_cat_bounce：反弹高点后连续下跌 tick 计数
+
+	// Stateful Indicators
+	emaShort *StatefulZLEMA
+	emaLong  *StatefulZLEMA
+	emaTrend *StatefulEMA
+	emaKC    *StatefulEMA
 }
 
 func newStrategy(cfg Config, history []float64) *Strategy {
@@ -41,63 +47,107 @@ func newStrategy(cfg Config, history []float64) *Strategy {
 	if cfg.StrategyType == "waterfall" {
 		warmup = cfg.WFConsecutiveTicks + 10
 	}
+	// maxWindow estimation for ring buffer sizes
+	maxWindow := warmup + 500
+	if maxWindow < 1000 {
+		maxWindow = 1000
+	}
 	s := &Strategy{
 		cfg:        cfg,
 		p:          portfolio{name: cfg.Name, cash: cfg.InitialCapital, peakEquity: cfg.InitialCapital},
 		warmupNeed: warmup,
+		priceBuf:   NewRingBuffer(maxWindow),
 	}
+
+	// Initialize required EMAs
+	if cfg.EMAShort > 0 {
+		s.emaShort = NewStatefulZLEMA(cfg.EMAShort)
+	}
+	if cfg.EMALong > 0 {
+		s.emaLong = NewStatefulZLEMA(cfg.EMALong)
+	}
+	if cfg.TrendPeriod > 0 {
+		s.emaTrend = NewStatefulEMA(cfg.TrendPeriod)
+	}
+	if cfg.SqueezeATRPeriod > 0 {
+		s.emaKC = NewStatefulEMA(cfg.SqueezeATRPeriod)
+	}
+
 	if len(history) > 0 {
-		s.prices = append(s.prices, history...)
-		if len(s.prices) >= s.warmupNeed {
-			s.prevShortEMA = calcZLEMA(s.prices, cfg.EMAShort)
-			s.prevLongEMA = calcZLEMA(s.prices, cfg.EMALong)
-			log.Printf("[%-4s] 历史预热完成：%d 条记录\n", cfg.Name, len(s.prices))
+		for _, p := range history {
+			s.feedPrice(p)
+		}
+		if s.priceBuf.count >= s.warmupNeed {
+			if s.emaShort != nil {
+				s.prevShortEMA = s.emaShort.Value()
+			}
+			if s.emaLong != nil {
+				s.prevLongEMA = s.emaLong.Value()
+			}
+			log.Printf("[%-4s] 历史预热完成：%d 条记录\n", cfg.Name, s.priceBuf.count)
 		} else {
-			log.Printf("[%-4s] 历史数据不足（%d/%d），仍需预热\n", cfg.Name, len(s.prices), s.warmupNeed)
+			log.Printf("[%-4s] 历史数据不足（%d/%d），仍需预热\n", cfg.Name, s.priceBuf.count, s.warmupNeed)
 		}
 	}
 	return s
 }
 
+// feedPrice updates internal buffer and global stateful indicators
+func (s *Strategy) feedPrice(price float64) {
+	s.priceBuf.Add(price)
+	if s.emaShort != nil {
+		s.emaShort.Update(price)
+	}
+	if s.emaLong != nil {
+		s.emaLong.Update(price)
+	}
+	if s.emaTrend != nil {
+		s.emaTrend.Update(price)
+	}
+	if s.emaKC != nil {
+		s.emaKC.Update(price)
+	}
+}
+
 // onPrice 处理一次价格更新：dispatches to strategy-specific handler.
 // Returns immediately (no-op) if strategy is disabled.
-func (s *Strategy) onPrice(price float64, endTime time.Time) {
+func (s *Strategy) onPrice(tick Tick, endTime time.Time) {
 	if s.cfg.Disabled {
 		return
 	}
 	switch s.cfg.StrategyType {
 	case "trend_prob":
-		s.onPriceTrendProb(price, endTime)
+		s.onPriceTrendProb(tick, endTime)
 	case "squeeze_breakout":
-		s.onPriceSqueezeBreakout(price, endTime)
+		s.onPriceSqueezeBreakout(tick, endTime)
 	case "dead_cat_bounce":
-		s.onPriceDeadCatBounce(price, endTime)
+		s.onPriceDeadCatBounce(tick, endTime)
 	case "waterfall":
-		s.onPriceWaterfall(price, endTime)
+		s.onPriceWaterfall(tick, endTime)
 	default:
-		s.onPriceEMA(price, endTime)
+		s.onPriceEMA(tick, endTime)
 	}
 }
 
 // forceLiquidate 强制平仓（到期 / 中断退出时调用）
-func (s *Strategy) forceLiquidate(price float64, reason string) {
+func (s *Strategy) forceLiquidate(tick Tick, reason string) {
 	if s.cfg.Disabled {
 		return
 	}
 	if s.p.inPosition() {
-		s.p.closePos(s.cfg, price, reason, &s.trades)
+		s.p.closePos(s.cfg, tick, reason, &s.trades)
 	}
 }
 
-func (s *Strategy) printStatus(price float64, endTime time.Time, indicators string, signal string) {
-	equity := s.p.totalEquity(s.cfg, price)
+func (s *Strategy) printStatus(tick Tick, endTime time.Time, indicators string, signal string) {
+	equity := s.p.totalEquity(s.cfg, tick)
 	pnl := equity - s.cfg.InitialCapital
 	pnlPct := pnl / s.cfg.InitialCapital * 100
 	remaining := time.Until(endTime).Round(time.Second)
 
 	position := "空仓"
 	if s.p.inPosition() {
-		pct := s.p.positionPct(price)
+		pct := s.p.positionPct(tick)
 		position = fmt.Sprintf("%s仓 价格%+.3f%% 权益%+.2f%%",
 			s.p.direction, pct*100, pct*s.cfg.Leverage*100)
 	}
@@ -111,9 +161,9 @@ func (s *Strategy) printStatus(price float64, endTime time.Time, indicators stri
 	}
 }
 
-func (s *Strategy) printReport(startTime time.Time, lastPrice float64) {
+func (s *Strategy) printReport(startTime time.Time, lastTick Tick) {
 	elapsed := time.Since(startTime).Round(time.Second)
-	finalEquity := s.p.totalEquity(s.cfg, lastPrice)
+	finalEquity := s.p.totalEquity(s.cfg, lastTick)
 	pnl := finalEquity - s.cfg.InitialCapital
 	pnlPct := pnl / s.cfg.InitialCapital * 100
 
@@ -135,12 +185,12 @@ func (s *Strategy) printReport(startTime time.Time, lastPrice float64) {
 }
 
 // printAllReports 打印各策略详细报告 + 汇总对比表（跳过已禁用策略）
-func printAllReports(strategies []*Strategy, startTime time.Time, lastPrice float64) {
+func printAllReports(strategies []*Strategy, startTime time.Time, lastTick Tick) {
 	for _, s := range strategies {
 		if s.cfg.Disabled {
 			continue
 		}
-		s.printReport(startTime, lastPrice)
+		s.printReport(startTime, lastTick)
 	}
 
 	// 只汇总启用的策略
@@ -162,7 +212,7 @@ func printAllReports(strategies []*Strategy, startTime time.Time, lastPrice floa
 
 	totalInit, totalFinal := 0.0, 0.0
 	for _, s := range enabled {
-		fin := s.p.totalEquity(s.cfg, lastPrice)
+		fin := s.p.totalEquity(s.cfg, lastTick)
 		pnl := fin - s.cfg.InitialCapital
 		pnlPct := pnl / s.cfg.InitialCapital * 100
 		totalInit += s.cfg.InitialCapital

@@ -8,8 +8,9 @@ import (
 )
 
 // onPriceTrendProb 趋势概率策略：无止损，达目标收益率平仓，方向由趋势概率+随机扰动决定
-func (s *Strategy) onPriceTrendProb(price float64, endTime time.Time) {
-	s.prices = append(s.prices, price)
+func (s *Strategy) onPriceTrendProb(tick Tick, endTime time.Time) {
+	price := tick.Prc
+	s.feedPrice(price)
 
 	// Kalman 滤波（预热期间也运行以积累状态估计）
 	// kVelPct：速度估计（占价格比率）；正 = 上行趋势，负 = 下行趋势，≈0 = 随机游走
@@ -23,20 +24,20 @@ func (s *Strategy) onPriceTrendProb(price float64, endTime time.Time) {
 		kVelPct = vel / price
 	}
 
-	if len(s.prices) < s.warmupNeed {
+	if s.priceBuf.count < s.warmupNeed {
 		fmt.Printf("[%s] [%-5s] 数据采集中 $%.2f (%d/%d)\n",
-			time.Now().Format("15:04:05"), s.cfg.Name, price, len(s.prices), s.warmupNeed)
+			time.Now().Format("15:04:05"), s.cfg.Name, price, s.priceBuf.count, s.warmupNeed)
 		return
 	}
 
-	upProb := calcTrendProb(s.prices, s.cfg.TrendLookback)
+	upProb := calcTrendProb(s.priceBuf, s.cfg.TrendLookback)
 	signal := ""
 
 	// 时间 + 亏损双重衰减目标；positionPct/equityGain 提前计算供后续平仓逻辑复用
 	var decayedTarget, decayElapsed, equityGain float64
 	var positionPct float64
 	if s.p.inPosition() {
-		positionPct = s.p.positionPct(price)
+		positionPct = s.p.positionPct(tick)
 		equityGain = positionPct * s.cfg.Leverage
 
 		// 时间衰减因子：(1 - t/T)^decay_exp
@@ -74,27 +75,26 @@ func (s *Strategy) onPriceTrendProb(price float64, endTime time.Time) {
 	}
 
 	// 爆仓保护：29x 杠杆下约 3.45% 逆向价格移动触发
-	if s.p.inPosition() && s.p.totalEquity(s.cfg, price) <= 0 {
-		s.p.closePos(s.cfg, price, "爆仓", &s.trades)
+	if s.p.inPosition() && s.p.totalEquity(s.cfg, tick) <= 0 {
+		s.p.closePos(s.cfg, tick, "爆仓", &s.trades)
 		signal = "\033[31m⚠ 爆仓\033[0m"
 	}
 
-	// 平仓逻辑（优先级：硬止损 > 衰减止损 > 达标止盈）
-	// 硬止损：价格逆向超过 stop_loss 阈值，立即截断亏损，避免大幅回撤
 	if s.p.inPosition() {
-		switch {
-		case s.cfg.StopLoss > 0 && positionPct <= -s.cfg.StopLoss:
-			s.p.closePos(s.cfg, price, "止损", &s.trades)
-			signal = fmt.Sprintf("\033[31m止损(价%+.3f%% 权益%+.1f%%)\033[0m",
-				positionPct*100, equityGain*100)
-		case decayedTarget <= 0:
-			s.p.closePos(s.cfg, price, "衰减止损", &s.trades)
-			signal = fmt.Sprintf("\033[33m衰减止损\033[0m(持仓%.0fs 盈亏%+.1f%%)",
-				decayElapsed, equityGain*100)
-		case equityGain >= decayedTarget:
-			s.p.closePos(s.cfg, price, "达标", &s.trades)
-			signal = fmt.Sprintf("\033[32m达标平仓\033[0m(目标%.1f%%→%.1f%% 实%+.1f%%)",
-				s.currentTarget*100, decayedTarget*100, equityGain*100)
+		triggered, stopMsg := s.p.checkStops(s.cfg, tick, &s.trades)
+		if triggered {
+			signal = stopMsg
+		} else {
+			switch {
+			case decayedTarget <= 0:
+				s.p.closePos(s.cfg, tick, "衰减止损", &s.trades)
+				signal = fmt.Sprintf("\033[33m衰减止损\033[0m(持仓%.0fs 盈亏%+.1f%%)",
+					decayElapsed, equityGain*100)
+			case equityGain >= decayedTarget:
+				s.p.closePos(s.cfg, tick, "达标", &s.trades)
+				signal = fmt.Sprintf("\033[32m达标平仓\033[0m(目标%.1f%%→%.1f%% 实%+.1f%%)",
+					s.currentTarget*100, decayedTarget*100, equityGain*100)
+			}
 		}
 	}
 
@@ -140,18 +140,18 @@ func (s *Strategy) onPriceTrendProb(price float64, endTime time.Time) {
 		target := math.Min(s.cfg.TargetMax, math.Max(s.cfg.TargetMin, baseTarget+noise))
 		s.currentTarget = target
 		s.openTime = time.Now()
-		s.p.openPos(s.cfg, d, price, &s.trades)
+		s.p.openPosVolAdjusted(s.cfg, d, tick, 0.015, &s.trades)
 		signal = fmt.Sprintf("%s 目标%.1f%%", entryTag, target*100)
 	}
 
 	// 状态输出（Kalman 模式显示速度估计，趋势概率模式显示上涨概率）
-	equity := s.p.totalEquity(s.cfg, price)
+	equity := s.p.totalEquity(s.cfg, tick)
 	pnl := equity - s.cfg.InitialCapital
 	pnlPct := pnl / s.cfg.InitialCapital * 100
 	timeLeft := time.Until(endTime).Round(time.Second)
 	position := "空仓"
 	if s.p.inPosition() {
-		pct := s.p.positionPct(price)
+		pct := s.p.positionPct(tick)
 		decayRemain := time.Duration(float64(s.cfg.DecaySec)-decayElapsed) * time.Second
 		position = fmt.Sprintf("%s仓 %+.3f%% 目标%.1f%%→%.1f%%(剩%v)",
 			s.p.direction, pct*100, s.currentTarget*100, decayedTarget*100, decayRemain.Round(time.Second))

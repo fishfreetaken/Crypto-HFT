@@ -15,8 +15,9 @@ import (
 //   - 在突破触发的第一个 tick 立即以高杠杆入场，方向由价格相对 BB 中轨决定
 //   - 结合 ER（效率比率）过滤假突破（ER 低 = 突破后很快反转 = 假）
 //   - 设置超时强平（持仓超过 squeeze_max_hold_sec 秒则强制出场，防止突破衰减变震荡）
-func (s *Strategy) onPriceSqueezeBreakout(price float64, endTime time.Time) {
-	s.prices = append(s.prices, price)
+func (s *Strategy) onPriceSqueezeBreakout(tick Tick, endTime time.Time) {
+	price := tick.Prc
+	s.feedPrice(price)
 
 	// Kalman 滤波（预热期也运行，积累状态估计）
 	kVelPct := 0.0
@@ -29,19 +30,19 @@ func (s *Strategy) onPriceSqueezeBreakout(price float64, endTime time.Time) {
 		kVelPct = vel / price
 	}
 
-	if len(s.prices) < s.warmupNeed {
+	if s.priceBuf.count < s.warmupNeed {
 		fmt.Printf("[%s] [%-5s] 数据采集中 $%.2f (%d/%d)\n",
-			time.Now().Format("15:04:05"), s.cfg.Name, price, len(s.prices), s.warmupNeed)
+			time.Now().Format("15:04:05"), s.cfg.Name, price, s.priceBuf.count, s.warmupNeed)
 		return
 	}
 
 	// ─── 计算 BB + Keltner 通道 ───
-	bbUpper, bbMid, bbLower := calcBollingerBands(s.prices, s.cfg.SqueezeBBPeriod, s.cfg.SqueezeBBStdDev)
-	atr := calcATR(s.prices, s.cfg.SqueezeATRPeriod)
-	kcEMA := calcEMA(s.prices, s.cfg.SqueezeATRPeriod)
+	bbUpper, bbMid, bbLower := calcBollingerBands(s.priceBuf, s.cfg.SqueezeBBPeriod, s.cfg.SqueezeBBStdDev)
+	atr := calcATR(s.priceBuf, s.cfg.SqueezeATRPeriod)
+	kcEMA := s.emaKC.Value()
 	kcUpper := kcEMA + s.cfg.SqueezeKCMult*atr
 	kcLower := kcEMA - s.cfg.SqueezeKCMult*atr
-	er := calcER(s.prices, s.cfg.SqueezeATRPeriod)
+	er := calcER(s.priceBuf, s.cfg.SqueezeATRPeriod)
 
 	// BB 宽度（百分比）
 	bbWidth := 0.0
@@ -95,25 +96,23 @@ func (s *Strategy) onPriceSqueezeBreakout(price float64, endTime time.Time) {
 		price, bbWidth, kcWidth, er, kColor, kVelPct*100, squeezeTag)
 
 	signal := ""
-	equity := s.p.totalEquity(s.cfg, price)
+	equity := s.p.totalEquity(s.cfg, tick)
 	if equity > s.p.peakEquity {
 		s.p.peakEquity = equity
 	}
 
-	// ─── 优先级 1：平仓（止损 / 止盈 / 超时）───
+	// ─── 优先级 1：平仓（止损 / 止盈 / 跟踪止损 / 超时）───
 	if s.p.inPosition() {
-		pct := s.p.positionPct(price)
-		holdSec := time.Since(s.openTime).Seconds()
-		switch {
-		case pct <= -s.cfg.StopLoss:
-			s.p.closePos(s.cfg, price, "止损", &s.trades)
-			signal = fmt.Sprintf("\033[31m止损(%.3f%%)\033[0m", pct*100)
-		case pct >= s.cfg.TakeProfit:
-			s.p.closePos(s.cfg, price, "止盈", &s.trades)
-			signal = fmt.Sprintf("\033[32m止盈(+%.3f%%)\033[0m", pct*100)
-		case s.cfg.SqueezeMaxHoldSec > 0 && holdSec >= float64(s.cfg.SqueezeMaxHoldSec):
-			s.p.closePos(s.cfg, price, "超时", &s.trades)
-			signal = fmt.Sprintf("超时强平(持%.0fs %+.3f%%)", holdSec, pct*100)
+		triggered, stopSignal := s.p.checkStops(s.cfg, tick, &s.trades)
+		if triggered {
+			signal = stopSignal
+		} else {
+			holdSec := time.Since(s.openTime).Seconds()
+			if s.cfg.SqueezeMaxHoldSec > 0 && holdSec >= float64(s.cfg.SqueezeMaxHoldSec) {
+				s.p.closePos(s.cfg, tick, "超时", &s.trades)
+				pct := s.p.positionPct(tick)
+				signal = fmt.Sprintf("超时强平(持%.0fs %+.3f%%)", holdSec, pct*100)
+			}
 		}
 	}
 
@@ -125,12 +124,12 @@ func (s *Strategy) onPriceSqueezeBreakout(price float64, endTime time.Time) {
 	inCooldown := time.Since(s.p.lastTradeTime) < s.cfg.tradeCooldown()
 	if !s.p.inPosition() && !inCooldown && isBreakout && er > s.cfg.SqueezeConfirmER && signal == "" {
 		if price > bbMid && kVelLongOK { // 向上突破 + Kalman 速度向上确认 → 做多
-			s.p.openPos(s.cfg, dirLong, price, &s.trades)
+			s.p.openPosVolAdjusted(s.cfg, dirLong, tick, 0.015, &s.trades) // avg volatility assumed
 			s.openTime = time.Now()
 			signal = fmt.Sprintf("\033[32m挤压突破做多\033[0m (BB:%.3f%%→KC:%.3f%% ER:%.2f K:%+.4f%%)",
 				bbWidth, kcWidth, er, kVelPct*100)
 		} else if price <= bbMid && kVelShortOK { // 向下突破 + Kalman 速度向下确认 → 做空
-			s.p.openPos(s.cfg, dirShort, price, &s.trades)
+			s.p.openPosVolAdjusted(s.cfg, dirShort, tick, 0.015, &s.trades) // avg volatility assumed
 			s.openTime = time.Now()
 			signal = fmt.Sprintf("\033[31m挤压突破做空\033[0m (BB:%.3f%%→KC:%.3f%% ER:%.2f K:%+.4f%%)",
 				bbWidth, kcWidth, er, kVelPct*100)
@@ -160,7 +159,7 @@ func (s *Strategy) onPriceSqueezeBreakout(price float64, endTime time.Time) {
 				ck(inSqueeze), er, s.cfg.SqueezeConfirmER, ck(er > s.cfg.SqueezeConfirmER),
 				kDir, ck(!inCooldown))
 		} else {
-			pct := s.p.positionPct(price)
+			pct := s.p.positionPct(tick)
 			holdSec := time.Since(s.openTime).Seconds()
 			var slPrice, tpPrice float64
 			if s.p.direction == dirLong {
@@ -179,5 +178,5 @@ func (s *Strategy) onPriceSqueezeBreakout(price float64, endTime time.Time) {
 		}
 	}
 
-	s.printStatus(price, endTime, indicators, signal)
+	s.printStatus(tick, endTime, indicators, signal)
 }

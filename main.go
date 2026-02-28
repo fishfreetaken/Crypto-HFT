@@ -40,7 +40,8 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
 	// 加载历史价格（所有策略共用同一份历史数据，各自维护独立副本）
-	history := loadHistoricalPricesFromDir(appCfg.DataDir, appCfg.LookbackHours)
+	historyF := loadHistoricalPricesFromDir(appCfg.DataDir, appCfg.LookbackHours)
+	history := convertHistoricalToTicks(historyF)
 	if len(history) > 0 {
 		log.Printf("历史数据：从 %s/ 加载 %d 条记录\n", appCfg.DataDir, len(history))
 	} else {
@@ -50,14 +51,14 @@ func main() {
 	// 初始化各策略
 	strategies := make([]*Strategy, len(appCfg.Strategies))
 	for i, sc := range appCfg.Strategies {
-		strategies[i] = newStrategy(sc, history)
+		strategies[i] = newStrategy(sc, historyF)
 	}
 
 	startTime := time.Now()
 	endTime := startTime.Add(appCfg.tradeDuration())
-	lastPrice := 0.0
+	var lastTick Tick
 	if len(history) > 0 {
-		lastPrice = history[len(history)-1]
+		lastTick = history[len(history)-1]
 	}
 
 	// 启动信息
@@ -91,26 +92,26 @@ func main() {
 	for {
 		select {
 		case <-timer.C:
-			price, err := fetchPrice()
+			tick, err := fetchPrice()
 			if err != nil {
-				price = lastPrice
-				log.Printf("到期平仓获取价格失败，使用最后已知价格 $%.2f\n", price)
+				tick = lastTick
+				log.Printf("到期平仓获取价格失败，使用最后已知价格 %v\n", tick)
 			} else {
-				lastPrice = price
+				lastTick = tick
 			}
 			for _, s := range strategies {
-				s.forceLiquidate(price, "到期")
+				s.forceLiquidate(tick, "到期")
 			}
-			printAllReports(strategies, startTime, lastPrice)
+			printAllReports(strategies, startTime, lastTick)
 			return
 
 		case sv := <-sig:
 			fmt.Printf("\n[%s] 收到退出信号 (%v)，正在结算...\n",
 				time.Now().Format("15:04:05"), sv)
 			for _, s := range strategies {
-				s.forceLiquidate(lastPrice, "中断退出")
+				s.forceLiquidate(lastTick, "中断退出")
 			}
-			printAllReports(strategies, startTime, lastPrice)
+			printAllReports(strategies, startTime, lastTick)
 			return
 
 		case newCfg := <-reloadCh:
@@ -129,16 +130,16 @@ func main() {
 				time.Now().Format("15:04:05"), len(newCfg.Strategies))
 
 		case <-ticker.C:
-			price, err := fetchPrice()
+			tick, err := fetchPrice()
 			if err != nil {
 				log.Printf("获取价格失败: %v\n", err)
 				continue
 			}
-			lastPrice = price
-			fmt.Printf("[%s] ── BTC $%.2f ─────────────────────────────\n",
-				time.Now().Format("15:04:05"), price)
+			lastTick = tick
+			fmt.Printf("[%s] ── BTC $%.2f (B:%.2f A:%.2f) ────────────────\n",
+				time.Now().Format("15:04:05"), tick.Prc, tick.Bid1, tick.Ask1)
 			for _, s := range strategies {
-				s.onPrice(price, endTime)
+				s.onPrice(tick, endTime)
 			}
 		}
 	}

@@ -36,10 +36,11 @@ type Config struct {
 	Disabled       bool    `json:"disabled"` // true = 不执行且不输出；false（默认）= 正常运行
 	InitialCapital float64 `json:"initial_capital"`
 
-	Leverage   float64 `json:"leverage"`
-	TradeFee   float64 `json:"trade_fee"`
-	StopLoss   float64 `json:"stop_loss"`
-	TakeProfit float64 `json:"take_profit"`
+	Leverage     float64 `json:"leverage"`
+	TradeFee     float64 `json:"trade_fee"`
+	StopLoss     float64 `json:"stop_loss"`
+	TakeProfit   float64 `json:"take_profit"`
+	TrailingStop float64 `json:"trailing_stop"` // 动态追踪止损（如 0.015 表示价格从高点回落1.5%就平仓）
 
 	CooldownSec int `json:"cooldown_sec"`
 	EMAShort    int `json:"ema_short"`

@@ -11,8 +11,9 @@ import (
 //   - 当连续 WFConsecutiveTicks 个 tick 均下跌，且平均跌速 ≥ WFMinVelPct/tick
 //   - 说明多头止损被批量触发形成级联，趋势短期内强烈持续
 //   - Kalman 速度方向确认后高杠杆追空，快进快出（WFMaxHoldSec 超时平仓）
-func (s *Strategy) onPriceWaterfall(price float64, endTime time.Time) {
-	s.prices = append(s.prices, price)
+func (s *Strategy) onPriceWaterfall(tick Tick, endTime time.Time) {
+	price := tick.Prc
+	s.feedPrice(price)
 
 	// Kalman 滤波
 	kVelPct := 0.0
@@ -25,7 +26,7 @@ func (s *Strategy) onPriceWaterfall(price float64, endTime time.Time) {
 		kVelPct = vel / price
 	}
 
-	n := len(s.prices)
+	n := s.priceBuf.count
 	if n < s.warmupNeed {
 		fmt.Printf("[%s] [%-5s] 数据采集中 $%.2f (%d/%d)\n",
 			time.Now().Format("15:04:05"), s.cfg.Name, price, n, s.warmupNeed)
@@ -38,7 +39,10 @@ func (s *Strategy) onPriceWaterfall(price float64, endTime time.Time) {
 	avgTickDropPct := 0.0
 	consecutiveCount := 0
 	if n >= window {
-		recent := s.prices[n-window:]
+		recent := make([]float64, window)
+		for i := 0; i < window; i++ {
+			recent[window-1-i] = s.priceBuf.Get(i)
+		}
 		allDown = true
 		totalDrop := 0.0
 		for i := 1; i < len(recent); i++ {
@@ -71,25 +75,23 @@ func (s *Strategy) onPriceWaterfall(price float64, endTime time.Time) {
 		price, kColor, kVelPct*100, downTag, velTag)
 
 	signal := ""
-	equity := s.p.totalEquity(s.cfg, price)
+	equity := s.p.totalEquity(s.cfg, tick)
 	if equity > s.p.peakEquity {
 		s.p.peakEquity = equity
 	}
 
-	// ─── 优先级 1：平仓（止损 / 止盈 / 超时）───
+	// ─── 优先级 1：平仓（止损 / 止盈 / 跟踪止损 / 超时）───
 	if s.p.inPosition() {
-		pct := s.p.positionPct(price)
-		holdSec := time.Since(s.openTime).Seconds()
-		switch {
-		case pct <= -s.cfg.StopLoss:
-			s.p.closePos(s.cfg, price, "止损", &s.trades)
-			signal = fmt.Sprintf("\033[31m止损(%.3f%%)\033[0m", pct*100)
-		case pct >= s.cfg.TakeProfit:
-			s.p.closePos(s.cfg, price, "止盈", &s.trades)
-			signal = fmt.Sprintf("\033[32m止盈(+%.3f%%)\033[0m", pct*100)
-		case s.cfg.WFMaxHoldSec > 0 && holdSec >= float64(s.cfg.WFMaxHoldSec):
-			s.p.closePos(s.cfg, price, "超时", &s.trades)
-			signal = fmt.Sprintf("超时强平(持%.0fs %+.3f%%)", holdSec, pct*100)
+		triggered, stopSignal := s.p.checkStops(s.cfg, tick, &s.trades)
+		if triggered {
+			signal = stopSignal
+		} else {
+			holdSec := time.Since(s.openTime).Seconds()
+			if s.cfg.WFMaxHoldSec > 0 && holdSec >= float64(s.cfg.WFMaxHoldSec) {
+				s.p.closePos(s.cfg, tick, "超时", &s.trades)
+				pct := s.p.positionPct(tick)
+				signal = fmt.Sprintf("超时强平(持%.0fs %+.3f%%)", holdSec, pct*100)
+			}
 		}
 	}
 
@@ -99,7 +101,7 @@ func (s *Strategy) onPriceWaterfall(price float64, endTime time.Time) {
 	inCooldown := time.Since(s.p.lastTradeTime) < s.cfg.tradeCooldown()
 
 	if !s.p.inPosition() && !inCooldown && signal == "" && velOK && kVelOK {
-		s.p.openPos(s.cfg, dirShort, price, &s.trades)
+		s.p.openPosVolAdjusted(s.cfg, dirShort, tick, 0.015, &s.trades) // avg volatility assumed
 		s.openTime = time.Now()
 		signal = fmt.Sprintf("\033[31m瀑布做空\033[0m 连跌%d格 均速%.3f%%/格 K:%+.4f%%",
 			consecutiveCount, avgTickDropPct*100, kVelPct*100)
@@ -118,7 +120,7 @@ func (s *Strategy) onPriceWaterfall(price float64, endTime time.Time) {
 				ck(allDown), ck(allDown && avgTickDropPct >= s.cfg.WFMinVelPct),
 				ck(kVelOK), ck(!inCooldown))
 		} else {
-			pct := s.p.positionPct(price)
+			pct := s.p.positionPct(tick)
 			holdSec := time.Since(s.openTime).Seconds()
 			slPrice := s.p.entryPrice * (1 + s.cfg.StopLoss)
 			tpPrice := s.p.entryPrice * (1 - s.cfg.TakeProfit)
@@ -128,5 +130,5 @@ func (s *Strategy) onPriceWaterfall(price float64, endTime time.Time) {
 		}
 	}
 
-	s.printStatus(price, endTime, indicators, signal)
+	s.printStatus(tick, endTime, indicators, signal)
 }

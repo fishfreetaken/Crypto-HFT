@@ -12,8 +12,9 @@ import (
 //   - 低点后出现小幅反弹（≥ DCBBounceMinPct），但反弹幅度不超过总跌幅的 DCBBounceMaxPct
 //   - 反弹结束时（连续 DCBConfirmTicks 个 tick 下跌）做空入场
 //   - 只做空：死猫反弹专指下跌行情中的弱反弹，不做多
-func (s *Strategy) onPriceDeadCatBounce(price float64, endTime time.Time) {
-	s.prices = append(s.prices, price)
+func (s *Strategy) onPriceDeadCatBounce(tick Tick, endTime time.Time) {
+	price := tick.Prc
+	s.feedPrice(price)
 
 	// Kalman 滤波（预热期间也运行）
 	kVelPct := 0.0
@@ -26,7 +27,7 @@ func (s *Strategy) onPriceDeadCatBounce(price float64, endTime time.Time) {
 		kVelPct = vel / price
 	}
 
-	n := len(s.prices)
+	n := s.priceBuf.count
 	if n < s.warmupNeed {
 		fmt.Printf("[%s] [%-5s] 数据采集中 $%.2f (%d/%d)\n",
 			time.Now().Format("15:04:05"), s.cfg.Name, price, n, s.warmupNeed)
@@ -38,7 +39,10 @@ func (s *Strategy) onPriceDeadCatBounce(price float64, endTime time.Time) {
 	if n < window {
 		window = n
 	}
-	wp := s.prices[n-window:]
+	wp := make([]float64, window)
+	for i := 0; i < window; i++ {
+		wp[window-1-i] = s.priceBuf.Get(i)
+	}
 
 	// 找窗口内最低点位置
 	lowIdx := 0
@@ -78,10 +82,10 @@ func (s *Strategy) onPriceDeadCatBounce(price float64, endTime time.Time) {
 	}
 
 	// 更新连续下跌计数
-	if n >= 2 && price < s.prices[n-2] {
-		s.dcbConsecutiveDown++
+	if n >= 2 && price < s.priceBuf.Get(1) {
+		s.dcbConsecDown++
 	} else {
-		s.dcbConsecutiveDown = 0
+		s.dcbConsecDown = 0
 	}
 
 	// ─── 指标状态字符串 ───
@@ -98,25 +102,23 @@ func (s *Strategy) onPriceDeadCatBounce(price float64, endTime time.Time) {
 		price, kColor, kVelPct*100, patternTag)
 
 	signal := ""
-	equity := s.p.totalEquity(s.cfg, price)
+	equity := s.p.totalEquity(s.cfg, tick)
 	if equity > s.p.peakEquity {
 		s.p.peakEquity = equity
 	}
 
-	// ─── 优先级 1：平仓（止损 / 止盈 / 超时）───
+	// ─── 优先级 1：平仓（止损 / 止盈 / 跟踪止损 / 超时）───
 	if s.p.inPosition() {
-		pct := s.p.positionPct(price)
-		holdSec := time.Since(s.openTime).Seconds()
-		switch {
-		case pct <= -s.cfg.StopLoss:
-			s.p.closePos(s.cfg, price, "止损", &s.trades)
-			signal = fmt.Sprintf("\033[31m止损(%.3f%%)\033[0m", pct*100)
-		case pct >= s.cfg.TakeProfit:
-			s.p.closePos(s.cfg, price, "止盈", &s.trades)
-			signal = fmt.Sprintf("\033[32m止盈(+%.3f%%)\033[0m", pct*100)
-		case s.cfg.DCBMaxHoldSec > 0 && holdSec >= float64(s.cfg.DCBMaxHoldSec):
-			s.p.closePos(s.cfg, price, "超时", &s.trades)
-			signal = fmt.Sprintf("超时强平(持%.0fs %+.3f%%)", holdSec, pct*100)
+		triggered, stopSignal := s.p.checkStops(s.cfg, tick, &s.trades)
+		if triggered {
+			signal = stopSignal
+		} else {
+			holdSec := time.Since(s.openTime).Seconds()
+			if s.cfg.DCBMaxHoldSec > 0 && holdSec >= float64(s.cfg.DCBMaxHoldSec) {
+				s.p.closePos(s.cfg, tick, "超时", &s.trades)
+				pct := s.p.positionPct(tick)
+				signal = fmt.Sprintf("超时强平(持%.0fs %+.3f%%)", holdSec, pct*100)
+			}
 		}
 	}
 
@@ -130,11 +132,11 @@ func (s *Strategy) onPriceDeadCatBounce(price float64, endTime time.Time) {
 
 	if !s.p.inPosition() && !inCooldown && signal == "" &&
 		isDrop && isBounce && isWeakBounce && isPriceBelow &&
-		s.dcbConsecutiveDown >= s.cfg.DCBConfirmTicks && kVelOK {
-		s.p.openPos(s.cfg, dirShort, price, &s.trades)
+		s.dcbConsecDown >= s.cfg.DCBConfirmTicks && kVelOK {
+		s.p.openPosVolAdjusted(s.cfg, dirShort, tick, 0.015, &s.trades) // fallback average vol
 		s.openTime = time.Now()
 		signal = fmt.Sprintf("\033[31m死猫做空\033[0m 跌%.3f%% 反弹%.1f%%(≤%.0f%%) 确认%d格",
-			dropPct*100, bounceRatio*100, s.cfg.DCBBounceMaxPct*100, s.dcbConsecutiveDown)
+			dropPct*100, bounceRatio*100, s.cfg.DCBBounceMaxPct*100, s.dcbConsecDown)
 	}
 
 	// ─── 无信号时显示等待/持仓状态 ───
@@ -148,10 +150,10 @@ func (s *Strategy) onPriceDeadCatBounce(price float64, endTime time.Time) {
 		if !s.p.inPosition() {
 			signal = fmt.Sprintf("等死猫 跌%s 反弹%s 弱%s 确认%d/%d格%s K%s 冷却%s",
 				ck(isDrop), ck(isBounce), ck(isWeakBounce),
-				s.dcbConsecutiveDown, s.cfg.DCBConfirmTicks, ck(s.dcbConsecutiveDown >= s.cfg.DCBConfirmTicks),
+				s.dcbConsecDown, s.cfg.DCBConfirmTicks, ck(s.dcbConsecDown >= s.cfg.DCBConfirmTicks),
 				ck(kVelOK), ck(!inCooldown))
 		} else {
-			pct := s.p.positionPct(price)
+			pct := s.p.positionPct(tick)
 			holdSec := time.Since(s.openTime).Seconds()
 			slPrice := s.p.entryPrice * (1 + s.cfg.StopLoss)
 			tpPrice := s.p.entryPrice * (1 - s.cfg.TakeProfit)
@@ -161,5 +163,5 @@ func (s *Strategy) onPriceDeadCatBounce(price float64, endTime time.Time) {
 		}
 	}
 
-	s.printStatus(price, endTime, indicators, signal)
+	s.printStatus(tick, endTime, indicators, signal)
 }

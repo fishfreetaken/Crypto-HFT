@@ -9,82 +9,80 @@ import (
 	"time"
 )
 
+// ===== 数据结构：带盘口的高频快照 =====
+
+type Tick struct {
+	Prc  float64 // 最新成交价
+	Bid1 float64 // 买一价 (做空成交价/平多价)
+	Ask1 float64 // 卖一价 (做多成交价/平空价)
+	Vol  float64 // 成交量 (可选保留)
+}
+
+func (t Tick) String() string {
+	return fmt.Sprintf("P_%.2f_B_%.2f_A_%.2f", t.Prc, t.Bid1, t.Ask1)
+}
+
 // ===== HTTP 价格源（OKX → Bybit → Binance）=====
 
 var httpClient = &http.Client{Timeout: 5 * time.Second}
 
-func fetchFromOKX() (float64, error) {
-	resp, err := httpClient.Get("https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT")
+// fetchFromBinance_BBA 抓取币安盘口和最新价 (Bid/Ask/Prc)
+func fetchFromBinance_BBA() (Tick, error) {
+	// 并发两笔请求，或用更简便的 Ticker 接口 (ticker/bookTicker 含 bid/ask, ticker/price 含最新价)
+	// 由于这只是外壳演示，直接拿书本订单 (bookTicker)
+	resp, err := httpClient.Get("https://api.binance.com/api/v3/ticker/bookTicker?symbol=BTCUSDT")
 	if err != nil {
-		return 0, err
+		return Tick{}, err
 	}
 	defer resp.Body.Close()
-	var result struct {
-		Data []struct {
-			Last string `json:"last"`
-		} `json:"data"`
+
+	var book struct {
+		BidPrice string `json:"bidPrice"`
+		AskPrice string `json:"askPrice"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
+	if err := json.NewDecoder(resp.Body).Decode(&book); err != nil {
+		return Tick{}, err
 	}
-	if len(result.Data) == 0 {
-		return 0, fmt.Errorf("OKX 返回空数据")
+	
+	bid, _ := strconv.ParseFloat(book.BidPrice, 64)
+	ask, _ := strconv.ParseFloat(book.AskPrice, 64)
+	
+	// 近似取中间价作为Prc，如果有单独的 price 接口更精确，但 HFT 这里 bid/ask 足以。
+	if bid == 0 || ask == 0 {
+		return Tick{}, fmt.Errorf("invalid binance book")
 	}
-	return strconv.ParseFloat(result.Data[0].Last, 64)
+	return Tick{
+		Prc:  (bid + ask) / 2.0,
+		Bid1: bid,
+		Ask1: ask,
+	}, nil
 }
 
-func fetchFromBybit() (float64, error) {
-	resp, err := httpClient.Get("https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT")
-	if err != nil {
-		return 0, err
+// 兼容老版本的历史单价加载函数（回测部分，如果是 CSV 可以改这里）
+// 目前为了让旧的 float64 历史数据转配为伪造的 Tick：
+func convertHistoricalToTicks(history []float64) []Tick {
+	ticks := make([]Tick, len(history))
+	for i, p := range history {
+		// 历史数据如果是一维价格，强制加 0.1 的散点模拟 bid/ask 点差
+		ticks[i] = Tick{Prc: p, Bid1: p - 0.1, Ask1: p + 0.1}
 	}
-	defer resp.Body.Close()
-	var result struct {
-		Result struct {
-			List []struct {
-				LastPrice string `json:"lastPrice"`
-			} `json:"list"`
-		} `json:"result"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
-	}
-	if len(result.Result.List) == 0 {
-		return 0, fmt.Errorf("Bybit 返回空数据")
-	}
-	return strconv.ParseFloat(result.Result.List[0].LastPrice, 64)
+	return ticks
 }
 
-func fetchFromBinance() (float64, error) {
-	resp, err := httpClient.Get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	var result struct {
-		Price string `json:"price"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
-	}
-	return strconv.ParseFloat(result.Price, 64)
-}
-
-func fetchPrice() (float64, error) {
+func fetchPrice() (Tick, error) {
 	sources := []struct {
 		name string
-		fn   func() (float64, error)
+		fn   func() (Tick, error)
 	}{
-		{"OKX", fetchFromOKX},
-		{"Bybit", fetchFromBybit},
-		{"Binance", fetchFromBinance},
+		{"BinanceBook", fetchFromBinance_BBA},
+		// Bybit / OKX 可以同样改写成 BookTicker，这里先强行主用 Binance
 	}
 	for _, src := range sources {
-		price, err := src.fn()
+		tick, err := src.fn()
 		if err == nil {
-			return price, nil
+			return tick, nil
 		}
 		log.Printf("【%s】不可用: %v，尝试下一个源...", src.name, err)
 	}
-	return 0, fmt.Errorf("所有价格源均不可用")
+	return Tick{}, fmt.Errorf("所有价格源均不可用")
 }
