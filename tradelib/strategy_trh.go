@@ -209,6 +209,27 @@ func (s *Strategy) trhHandleDetectedA(tick Tick, endTime time.Time) {
 	}
 
 	if firstReversal && waterfallEnded {
+		// 添加 Kalman 速度方向验证（如果配置开启）
+		if s.Cfg.KalmanVelThresh > 0 && s.Cfg.KalmanR > 0 {
+			p2 := price * price
+			_, vel := s.kf.step(price,
+				p2*s.Cfg.KalmanQPos*s.Cfg.KalmanQPos,
+				p2*s.Cfg.KalmanQVel*s.Cfg.KalmanQVel,
+				p2*s.Cfg.KalmanR*s.Cfg.KalmanR)
+			kVelPct := vel / price
+
+			// 对于做多闪崩回归（趋势向下，回归向上），Kalman速度必须向上
+			if dp.trendDir == dirShort && kVelPct < s.Cfg.KalmanVelThresh {
+				s.trhPrintStatus(tick, endTime, 0, "等A型入场(K方向不符，需向上)")
+				return
+			}
+			// 对于做空冲高回归（趋势向上，回归向下），Kalman速度必须向下
+			if dp.trendDir == dirLong && kVelPct > -s.Cfg.KalmanVelThresh {
+				s.trhPrintStatus(tick, endTime, 0, "等A型入场(K方向不符，需向下)")
+				return
+			}
+		}
+
 		s.trhEnterDual(tick, trhModeFlashRevert)
 		return
 	}
