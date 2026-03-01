@@ -2,6 +2,7 @@ package tradelib
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -189,7 +190,31 @@ func (p *portfolio) checkStops(cfg Config, tick Tick, trades *[]tradeRecord) (tr
 		return true, fmt.Sprintf("\033[31m硬止损(%.3f%%)\033[0m", pct*100)
 	}
 
-	if cfg.TakeProfit > 0 && pct >= cfg.TakeProfit {
+	// 动态止盈（时间衰减）：持仓越久，止盈标准越低，直至逼近保本线
+	takeProfit := cfg.TakeProfit
+	if cfg.DecaySec > 0 && takeProfit > 0 {
+		holdSecs := time.Since(p.lastTradeTime).Seconds()
+		if holdSecs > 0 {
+			minTarget := cfg.TargetMin
+			if minTarget == 0 {
+				minTarget = 0.0015 // 默认保底 0.15%，恰好覆盖开平仓滑点和双边手续费
+			}
+			if takeProfit > minTarget {
+				ratio := holdSecs / float64(cfg.DecaySec)
+				if ratio > 1.0 {
+					ratio = 1.0
+				}
+				exp := cfg.DecayExp
+				if exp <= 0 {
+					exp = 1.0
+				}
+				decayFactor := math.Pow(ratio, exp)
+				takeProfit = takeProfit - (takeProfit-minTarget)*decayFactor
+			}
+		}
+	}
+
+	if takeProfit > 0 && pct >= takeProfit {
 		p.closePos(cfg, tick, "固定止盈", trades)
 		return true, fmt.Sprintf("\033[32m止盈(+%.3f%%)\033[0m", pct*100)
 	}

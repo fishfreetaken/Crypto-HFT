@@ -15,7 +15,14 @@ import (
 // ===== 主程序 =====
 
 func main() {
-	cfgPath := "config.json"
+	// 工作目录修正：如果在 cmd/trader 目录下执行，则退回根目录
+	if _, err := os.Stat("strategy/config.json"); os.IsNotExist(err) {
+		if _, err := os.Stat("../../strategy/config.json"); err == nil {
+			os.Chdir("../../")
+		}
+	}
+
+	cfgPath := "strategy/config.json"
 	if len(os.Args) > 1 {
 		cfgPath = os.Args[1]
 	}
@@ -40,6 +47,12 @@ func main() {
 	// 退出信号监听
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	// 启动重大资讯与宏观数据雷达 (每 10 分钟扫描一次)
+	tradelib.GlobalRadar.StartRadar(10 * time.Minute)
+	time.AfterFunc(2*time.Second, func() {
+		tradelib.GlobalRadar.PrintReport()
+	})
 
 	// 加载历史价格（所有策略共用同一份历史数据，各自维护独立副本）
 	historyF := tradelib.LoadHistoricalPricesFromDir(appCfg.DataDir, appCfg.LookbackHours)
@@ -94,7 +107,7 @@ func main() {
 	for {
 		select {
 		case <-timer.C:
-			tick, err := tradelib.FetchPrice()
+			tick, err := tradelib.FetchPrice(appCfg.DataDir)
 			if err != nil {
 				tick = lastTick
 				log.Printf("到期平仓获取价格失败，使用最后已知价格 %v\n", tick)
@@ -108,13 +121,34 @@ func main() {
 			return
 
 		case sv := <-sig:
-			fmt.Printf("\n[%s] 收到退出信号 (%v)，正在结算...\n",
-				time.Now().Format("15:04:05"), sv)
+			if lastTick.Prc <= 0 {
+				tick, err := tradelib.FetchPrice(appCfg.DataDir)
+				if err == nil {
+					lastTick = tick
+				}
+			}
+
+			reason := "用户手动中断 (Ctrl+C)"
+			if sv == syscall.SIGTERM {
+				reason = "系统终止指令 (SIGTERM)"
+			}
+
+			fmt.Printf("\n")
+			fmt.Printf("📛 ======================================================== 📛\n")
+			fmt.Printf("               交易终端安全熔断触发\n")
+			fmt.Printf("终止原因: %s\n", reason)
+			fmt.Printf("中止时间: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+			if lastTick.Prc > 0 {
+				fmt.Printf("结算基准: $%.2f (买一:%.2f 卖一:%.2f)\n", lastTick.Prc, lastTick.Bid1, lastTick.Ask1)
+			}
+			fmt.Printf("正在对所有在途仓位执行市价清仓强制结算...\n")
+			fmt.Printf("📛 ======================================================== 📛\n\n")
+
 			for _, s := range strategies {
-				s.ForceLiquidate(lastTick, "中断退出")
+				s.ForceLiquidate(lastTick, "中断保护")
 			}
 			tradelib.PrintAllReports(strategies, startTime, lastTick)
-			return
+			os.Exit(0)
 
 		case newCfg := <-reloadCh:
 			// 按名称匹配更新策略运行时参数（structural 参数需重启生效）
@@ -131,17 +165,18 @@ func main() {
 				time.Now().Format("15:04:05"), len(newCfg.Strategies))
 
 		case <-ticker.C:
-			tick, err := tradelib.FetchPrice()
+			tick, err := tradelib.FetchPrice(appCfg.DataDir)
 			if err != nil {
 				log.Printf("获取价格失败: %v\n", err)
 				continue
 			}
 			lastTick = tick
-			fmt.Printf("[%s] ── BTC $%.2f (B:%.2f A:%.2f) ────────────────\n",
+			fmt.Printf("\n╭── [%s] BTC现价: $%.2f (买一:%.2f 卖一:%.2f) ───\n",
 				time.Now().Format("15:04:05"), tick.Prc, tick.Bid1, tick.Ask1)
 			for _, s := range strategies {
 				s.OnPrice(tick, endTime)
 			}
+			fmt.Println("╰──────────────────────────────────────────────────────────")
 		}
 	}
 }

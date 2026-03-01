@@ -97,80 +97,109 @@ func watchConfig(cfgPath string, checkEvery time.Duration, ch chan<- collectorCf
 
 var httpClient = &http.Client{Timeout: 5 * time.Second}
 
-func fetchFromOKX() (float64, error) {
+func fetchFromOKX() (PriceRecord, error) {
 	resp, err := httpClient.Get("https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT")
 	if err != nil {
-		return 0, err
+		return PriceRecord{}, err
 	}
 	defer resp.Body.Close()
 	var result struct {
 		Data []struct {
-			Last string `json:"last"`
+			Last  string `json:"last"`
+			Bid   string `json:"bidPx"`
+			Ask   string `json:"askPx"`
+			BidSz string `json:"bidSz"`
+			AskSz string `json:"askSz"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
+		return PriceRecord{}, err
 	}
 	if len(result.Data) == 0 {
-		return 0, fmt.Errorf("OKX 返回空数据")
+		return PriceRecord{}, fmt.Errorf("OKX 返回空数据")
 	}
-	return strconv.ParseFloat(result.Data[0].Last, 64)
+	d := result.Data[0]
+	last, _ := strconv.ParseFloat(d.Last, 64)
+	bid, _ := strconv.ParseFloat(d.Bid, 64)
+	ask, _ := strconv.ParseFloat(d.Ask, 64)
+	bv, _ := strconv.ParseFloat(d.BidSz, 64)
+	av, _ := strconv.ParseFloat(d.AskSz, 64)
+	return PriceRecord{Price: last, Bid: bid, Ask: ask, BidVol: bv, AskVol: av}, nil
 }
 
-func fetchFromBybit() (float64, error) {
+func fetchFromBybit() (PriceRecord, error) {
 	resp, err := httpClient.Get("https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT")
 	if err != nil {
-		return 0, err
+		return PriceRecord{}, err
 	}
 	defer resp.Body.Close()
 	var result struct {
 		Result struct {
 			List []struct {
 				LastPrice string `json:"lastPrice"`
+				Bid1Price string `json:"bid1Price"`
+				Ask1Price string `json:"ask1Price"`
+				Bid1Size  string `json:"bid1Size"`
+				Ask1Size  string `json:"ask1Size"`
 			} `json:"list"`
 		} `json:"result"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
+		return PriceRecord{}, err
 	}
 	if len(result.Result.List) == 0 {
-		return 0, fmt.Errorf("Bybit 返回空数据")
+		return PriceRecord{}, fmt.Errorf("Bybit 返回空数据")
 	}
-	return strconv.ParseFloat(result.Result.List[0].LastPrice, 64)
+	d := result.Result.List[0]
+	last, _ := strconv.ParseFloat(d.LastPrice, 64)
+	bid, _ := strconv.ParseFloat(d.Bid1Price, 64)
+	ask, _ := strconv.ParseFloat(d.Ask1Price, 64)
+	bv, _ := strconv.ParseFloat(d.Bid1Size, 64)
+	av, _ := strconv.ParseFloat(d.Ask1Size, 64)
+	return PriceRecord{Price: last, Bid: bid, Ask: ask, BidVol: bv, AskVol: av}, nil
 }
 
-func fetchFromBinance() (float64, error) {
-	resp, err := httpClient.Get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
+func fetchFromBinance() (PriceRecord, error) {
+	resp, err := httpClient.Get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT")
 	if err != nil {
-		return 0, err
+		return PriceRecord{}, err
 	}
 	defer resp.Body.Close()
-	var result struct {
-		Price string `json:"price"`
+	var d struct {
+		LastPrice string `json:"lastPrice"`
+		BidPrice  string `json:"bidPrice"`
+		AskPrice  string `json:"askPrice"`
+		BidQty    string `json:"bidQty"`
+		AskQty    string `json:"askQty"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		return PriceRecord{}, err
 	}
-	return strconv.ParseFloat(result.Price, 64)
+	last, _ := strconv.ParseFloat(d.LastPrice, 64)
+	bid, _ := strconv.ParseFloat(d.BidPrice, 64)
+	ask, _ := strconv.ParseFloat(d.AskPrice, 64)
+	bv, _ := strconv.ParseFloat(d.BidQty, 64)
+	av, _ := strconv.ParseFloat(d.AskQty, 64)
+	return PriceRecord{Price: last, Bid: bid, Ask: ask, BidVol: bv, AskVol: av}, nil
 }
 
-func fetchPrice() (float64, error) {
+func fetchPrice() (PriceRecord, error) {
 	sources := []struct {
 		name string
-		fn   func() (float64, error)
+		fn   func() (PriceRecord, error)
 	}{
 		{"OKX", fetchFromOKX},
 		{"Bybit", fetchFromBybit},
 		{"Binance", fetchFromBinance},
 	}
 	for _, src := range sources {
-		price, err := src.fn()
+		record, err := src.fn()
 		if err == nil {
-			return price, nil
+			return record, nil
 		}
 		log.Printf("【%s】不可用: %v，尝试下一个源...", src.name, err)
 	}
-	return 0, fmt.Errorf("所有价格源均不可用")
+	return PriceRecord{}, fmt.Errorf("所有价格源均不可用")
 }
 
 // ===== 按小时轮转的文件写入器 =====
@@ -187,8 +216,12 @@ type fileWriter struct {
 
 // PriceRecord 写入文件的价格记录
 type PriceRecord struct {
-	Ts    time.Time `json:"ts"`
-	Price float64   `json:"price"`
+	Ts     time.Time `json:"ts"`
+	Price  float64   `json:"price"`
+	Bid    float64   `json:"bid,omitempty"`
+	Ask    float64   `json:"ask,omitempty"`
+	BidVol float64   `json:"bid_vol,omitempty"`
+	AskVol float64   `json:"ask_vol,omitempty"`
 }
 
 func (w *fileWriter) targetPath(t time.Time) string {
@@ -270,13 +303,13 @@ func main() {
 
 	// 立即采集一次（不等第一个 tick）
 	now := time.Now()
-	if price, err := fetchPrice(); err == nil {
-		rec := PriceRecord{Ts: now, Price: price}
-		if werr := w.write(rec); werr != nil {
+	if record, err := fetchPrice(); err == nil {
+		record.Ts = now
+		if werr := w.write(record); werr != nil {
 			log.Printf("写入失败: %v\n", werr)
 		} else {
 			fmt.Printf("[%s] $%.2f → %s (本次第 %d 条)\n",
-				now.Format("15:04:05"), price, w.curPath, w.total)
+				now.Format("15:04:05"), record.Price, w.curPath, w.total)
 		}
 	} else {
 		log.Printf("首次采集失败: %v\n", err)
@@ -304,18 +337,18 @@ func main() {
 			}
 
 		case t := <-ticker.C:
-			price, err := fetchPrice()
+			record, err := fetchPrice()
 			if err != nil {
 				log.Printf("采集失败: %v\n", err)
 				continue
 			}
-			rec := PriceRecord{Ts: t, Price: price}
-			if werr := w.write(rec); werr != nil {
+			record.Ts = t
+			if werr := w.write(record); werr != nil {
 				log.Printf("写入失败: %v\n", werr)
 				continue
 			}
 			fmt.Printf("[%s] $%.2f → %s (本次第 %d 条)\n",
-				t.Format("15:04:05"), price, w.curPath, w.total)
+				t.Format("15:04:05"), record.Price, w.curPath, w.total)
 		}
 	}
 }

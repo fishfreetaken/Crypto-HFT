@@ -101,12 +101,17 @@ func (s *Strategy) onPriceWaterfall(tick Tick, endTime time.Time) {
 	kVelOK := s.Cfg.KalmanVelThresh <= 0 || kVelPct < -s.Cfg.KalmanVelThresh
 	velOK := allDown && avgTickDropPct >= s.Cfg.WFMinVelPct
 	inCooldown := time.Since(s.p.lastTradeTime) < s.Cfg.tradeCooldown()
+	
+	obiOK := true
+	if tick.AskVol > 0 && tick.BidVol > 0 {
+		obiOK = tick.AskVol > tick.BidVol*1.1 // 卖盘压制买盘至少 10%
+	}
 
-	if !s.p.inPosition() && !inCooldown && signal == "" && velOK && kVelOK {
+	if !s.p.inPosition() && !inCooldown && signal == "" && velOK && kVelOK && obiOK {
 		s.p.openPosVolAdjusted(s.Cfg, dirShort, tick, 0.015, &s.trades) // avg volatility assumed
 		s.openTime = time.Now()
-		signal = fmt.Sprintf("\033[31m瀑布做空\033[0m 连跌%d格 均速%.3f%%/格 K:%+.4f%%",
-			consecutiveCount, avgTickDropPct*100, kVelPct*100)
+		signal = fmt.Sprintf("\033[31m瀑布做空\033[0m 连跌%d格 均速%.3f%%/格 K:%+.4f%% OBI:%.1fx",
+			consecutiveCount, avgTickDropPct*100, kVelPct*100, tick.AskVol/(tick.BidVol+0.0001))
 	}
 
 	// ─── 无信号时显示状态 ───
@@ -118,9 +123,9 @@ func (s *Strategy) onPriceWaterfall(tick Tick, endTime time.Time) {
 	}
 	if signal == "" && !s.Cfg.Quiet {
 		if !s.p.inPosition() {
-			signal = fmt.Sprintf("监控瀑布 连跌%s 均速%s K%s 冷却%s",
+			signal = fmt.Sprintf("监控瀑布 连跌%s 均速%s K%s OBI%s 冷却%s",
 				ck(allDown), ck(allDown && avgTickDropPct >= s.Cfg.WFMinVelPct),
-				ck(kVelOK), ck(!inCooldown))
+				ck(kVelOK), ck(obiOK), ck(!inCooldown))
 		} else {
 			pct := s.p.positionPct(tick)
 			holdSec := time.Since(s.openTime).Seconds()

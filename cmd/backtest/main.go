@@ -15,7 +15,14 @@ import (
 // 仅交易触发的盈亏（止损/止盈/目标）能准确反映价格走势。
 
 func main() {
-	cfgPath := "config.json"
+	// 工作目录修正：如果在 cmd/backtest 目录下执行，则退回根目录
+	if _, err := os.Stat("strategy/config.json"); os.IsNotExist(err) {
+		if _, err := os.Stat("../../strategy/config.json"); err == nil {
+			os.Chdir("../../")
+		}
+	}
+
+	cfgPath := "strategy/config.json"
 	if len(os.Args) > 1 {
 		cfgPath = os.Args[1]
 	}

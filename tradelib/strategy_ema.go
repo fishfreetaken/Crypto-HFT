@@ -125,11 +125,19 @@ func (s *Strategy) onPriceEMA(tick Tick, endTime time.Time) {
 			pct := s.p.positionPct(tick)
 			switch {
 			case s.p.direction == dirLong && rsi > s.Cfg.RSIExitLong && pct > 0:
-				s.p.closePos(s.Cfg, tick, "RSI超买", &s.trades)
-				signal = fmt.Sprintf("RSI超买(%.1f)平多", rsi)
+				if s.Cfg.KalmanVelThresh > 0 && kVelPct > s.Cfg.KalmanVelThresh*2.0 {
+					signal = fmt.Sprintf("\033[33mRSI超买(%.1f)抑制平仓(K强势)\033[0m", rsi)
+				} else {
+					s.p.closePos(s.Cfg, tick, "RSI超买", &s.trades)
+					signal = fmt.Sprintf("RSI超买(%.1f)平多", rsi)
+				}
 			case s.p.direction == dirShort && rsi < s.Cfg.RSIExitShort && pct > 0:
-				s.p.closePos(s.Cfg, tick, "RSI超卖", &s.trades)
-				signal = fmt.Sprintf("RSI超卖(%.1f)平空", rsi)
+				if s.Cfg.KalmanVelThresh > 0 && kVelPct < -s.Cfg.KalmanVelThresh*2.0 {
+					signal = fmt.Sprintf("\033[33mRSI超卖(%.1f)抑制平仓(K强势)\033[0m", rsi)
+				} else {
+					s.p.closePos(s.Cfg, tick, "RSI超卖", &s.trades)
+					signal = fmt.Sprintf("RSI超卖(%.1f)平空", rsi)
+				}
 			}
 		}
 	}
@@ -149,12 +157,18 @@ func (s *Strategy) onPriceEMA(tick Tick, endTime time.Time) {
 			emaBearish := shortEMA < longEMA
 			erLongThresh := s.Cfg.ERThreshold
 			erShortThresh := s.Cfg.ERThreshold
-			if price < trendEMA { erLongThresh *= 1.5 }
-			if price > trendEMA { erShortThresh *= 1.5 }
+			if price < trendEMA {
+				erLongThresh *= 1.5
+			}
+			if price > trendEMA {
+				erShortThresh *= 1.5
+			}
 			erLongOK := s.Cfg.ERThreshold <= 0 || er > erLongThresh
 			erShortOK := s.Cfg.ERThreshold <= 0 || er > erShortThresh
 			trendTag := func(withTrend bool) string {
-				if withTrend { return "顺势" }
+				if withTrend {
+					return "顺势"
+				}
 				return "逆势"
 			}
 			switch {
@@ -194,7 +208,9 @@ func (s *Strategy) onPriceEMA(tick Tick, endTime time.Time) {
 
 	// ─── 无信号时显示：距入场的缺口（空仓）或平仓触发价（持仓）───
 	ck := func(ok bool) string {
-		if ok { return "\033[32m✓\033[0m" }
+		if ok {
+			return "\033[32m✓\033[0m"
+		}
 		return "\033[31m✗\033[0m"
 	}
 	if signal == "" {
@@ -205,19 +221,27 @@ func (s *Strategy) onPriceEMA(tick Tick, endTime time.Time) {
 			emaBearish := shortEMA < longEMA
 			if emaBullish {
 				erThresh := s.Cfg.ERThreshold
-				if price < trendEMA { erThresh *= 1.5 }
+				if price < trendEMA {
+					erThresh *= 1.5
+				}
 				gap := price - bbLower
 				gapStr := fmt.Sprintf("\033[33m↓$%.0f\033[0m", gap)
-				if gap <= 0 { gapStr = fmt.Sprintf("\033[32m✓$%.0f\033[0m", bbLower) }
+				if gap <= 0 {
+					gapStr = fmt.Sprintf("\033[32m✓$%.0f\033[0m", bbLower)
+				}
 				signal = fmt.Sprintf("等多 价%s RSI:%.1f<%g%s ER:%.2f>%.2f%s K%s",
 					gapStr, rsi, s.Cfg.RSILongMax, ck(rsi < s.Cfg.RSILongMax),
 					er, erThresh, ck(er > erThresh), ck(kVelLong))
 			} else if emaBearish {
 				erThresh := s.Cfg.ERThreshold
-				if price > trendEMA { erThresh *= 1.5 }
+				if price > trendEMA {
+					erThresh *= 1.5
+				}
 				gap := bbUpper - price
 				gapStr := fmt.Sprintf("\033[33m↑$%.0f\033[0m", gap)
-				if gap <= 0 { gapStr = fmt.Sprintf("\033[32m✓$%.0f\033[0m", bbUpper) }
+				if gap <= 0 {
+					gapStr = fmt.Sprintf("\033[32m✓$%.0f\033[0m", bbUpper)
+				}
 				signal = fmt.Sprintf("等空 价%s RSI:%.1f>%g%s ER:%.2f>%.2f%s K%s",
 					gapStr, rsi, s.Cfg.RSIShortMin, ck(rsi > s.Cfg.RSIShortMin),
 					er, erThresh, ck(er > erThresh), ck(kVelShort))

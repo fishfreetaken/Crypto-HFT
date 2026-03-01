@@ -1,0 +1,11 @@
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.log
+*.txt
+*.jsonl
+/config.json
+/collector/data/
+/cmd/backtest/backtest_output*.txt

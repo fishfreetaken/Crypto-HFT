@@ -179,6 +179,20 @@ func (s *Strategy) OnPrice(tick Tick, endTime time.Time) {
 	if s.Cfg.Disabled {
 		return
 	}
+
+	// 核弹级资讯熔断：如果处于全网高危状态且未持仓，不断刷新最后交易时间，强行触发冷却锁死
+	if GlobalRadar.IsHighRiskMode() {
+		if !s.p.inPosition() {
+			s.p.lastTradeTime = time.Now()
+		}
+		if s.Cfg.StrategyType == "trend_reversion_hedge" {
+			if s.trhDual.state == 0 || s.trhDual.state == 5 { // Idle or Cooldown
+				s.trhDual.state = 5 // Force Cooldown
+				s.trhDual.cooldownUntil = time.Now().Add(60 * time.Second)
+			}
+		}
+	}
+
 	switch s.Cfg.StrategyType {
 	case "trend_prob":
 		s.onPriceTrendProb(tick, endTime)
