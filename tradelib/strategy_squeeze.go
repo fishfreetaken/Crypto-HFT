@@ -1,4 +1,4 @@
-package main
+package tradelib
 
 import (
 	"fmt"
@@ -21,28 +21,30 @@ func (s *Strategy) onPriceSqueezeBreakout(tick Tick, endTime time.Time) {
 
 	// Kalman 滤波（预热期也运行，积累状态估计）
 	kVelPct := 0.0
-	if s.cfg.KalmanR > 0 {
+	if s.Cfg.KalmanR > 0 {
 		p2 := price * price
 		_, vel := s.kf.step(price,
-			p2*s.cfg.KalmanQPos*s.cfg.KalmanQPos,
-			p2*s.cfg.KalmanQVel*s.cfg.KalmanQVel,
-			p2*s.cfg.KalmanR*s.cfg.KalmanR)
+			p2*s.Cfg.KalmanQPos*s.Cfg.KalmanQPos,
+			p2*s.Cfg.KalmanQVel*s.Cfg.KalmanQVel,
+			p2*s.Cfg.KalmanR*s.Cfg.KalmanR)
 		kVelPct = vel / price
 	}
 
 	if s.priceBuf.count < s.warmupNeed {
-		fmt.Printf("[%s] [%-5s] 数据采集中 $%.2f (%d/%d)\n",
-			time.Now().Format("15:04:05"), s.cfg.Name, price, s.priceBuf.count, s.warmupNeed)
+		if !s.Cfg.Quiet {
+			fmt.Printf("[%s] [%-5s] 数据采集中 $%.2f (%d/%d)\n",
+				time.Now().Format("15:04:05"), s.Cfg.Name, price, s.priceBuf.count, s.warmupNeed)
+		}
 		return
 	}
 
 	// ─── 计算 BB + Keltner 通道 ───
-	bbUpper, bbMid, bbLower := calcBollingerBands(s.priceBuf, s.cfg.SqueezeBBPeriod, s.cfg.SqueezeBBStdDev)
-	atr := calcATR(s.priceBuf, s.cfg.SqueezeATRPeriod)
+	bbUpper, bbMid, bbLower := calcBollingerBands(s.priceBuf, s.Cfg.SqueezeBBPeriod, s.Cfg.SqueezeBBStdDev)
+	atr := calcATR(s.priceBuf, s.Cfg.SqueezeATRPeriod)
 	kcEMA := s.emaKC.Value()
-	kcUpper := kcEMA + s.cfg.SqueezeKCMult*atr
-	kcLower := kcEMA - s.cfg.SqueezeKCMult*atr
-	er := calcER(s.priceBuf, s.cfg.SqueezeATRPeriod)
+	kcUpper := kcEMA + s.Cfg.SqueezeKCMult*atr
+	kcLower := kcEMA - s.Cfg.SqueezeKCMult*atr
+	er := calcER(s.priceBuf, s.Cfg.SqueezeATRPeriod)
 
 	// BB 宽度（百分比）
 	bbWidth := 0.0
@@ -62,12 +64,12 @@ func (s *Strategy) onPriceSqueezeBreakout(tick Tick, endTime time.Time) {
 	//   SqueezeBBWidthPct > 0 → 用 BB 宽度绝对阈值（适合 5s 采样，ATR 极小导致 KC 极窄）
 	//   SqueezeBBWidthPct = 0 → 经典 BB⊂KC 判法（适合 30s+ 采样）
 	var inSqueeze bool
-	if s.cfg.SqueezeBBWidthPct > 0 {
+	if s.Cfg.SqueezeBBWidthPct > 0 {
 		bbWidthRatio := 0.0
 		if bbMid > 0 {
 			bbWidthRatio = (bbUpper - bbLower) / bbMid
 		}
-		inSqueeze = bbMid > 0 && bbWidthRatio < s.cfg.SqueezeBBWidthPct
+		inSqueeze = bbMid > 0 && bbWidthRatio < s.Cfg.SqueezeBBWidthPct
 	} else {
 		inSqueeze = bbUpper < kcUpper && bbLower > kcLower
 	}
@@ -77,9 +79,9 @@ func (s *Strategy) onPriceSqueezeBreakout(tick Tick, endTime time.Time) {
 	// 构建指标状态字符串
 	squeezeTag := "自由"
 	if inSqueeze {
-		if s.cfg.SqueezeBBWidthPct > 0 {
-			squeezeTag = fmt.Sprintf("\033[33m挤压中(BB%.4f%%<%.4f%%)\033[0m",
-				bbWidth, s.cfg.SqueezeBBWidthPct*100)
+		if s.Cfg.SqueezeBBWidthPct > 0 {
+			squeezeTag = fmt.Sprintf("\033[33m挤压中(BB%.4f%%<%.4f%%)\\033[0m",
+				bbWidth, s.Cfg.SqueezeBBWidthPct*100)
 		} else {
 			squeezeTag = fmt.Sprintf("\033[33m挤压中(压缩%.0f%%)\033[0m", compressionPct)
 		}
@@ -96,20 +98,20 @@ func (s *Strategy) onPriceSqueezeBreakout(tick Tick, endTime time.Time) {
 		price, bbWidth, kcWidth, er, kColor, kVelPct*100, squeezeTag)
 
 	signal := ""
-	equity := s.p.totalEquity(s.cfg, tick)
+	equity := s.p.totalEquity(s.Cfg, tick)
 	if equity > s.p.peakEquity {
 		s.p.peakEquity = equity
 	}
 
 	// ─── 优先级 1：平仓（止损 / 止盈 / 跟踪止损 / 超时）───
 	if s.p.inPosition() {
-		triggered, stopSignal := s.p.checkStops(s.cfg, tick, &s.trades)
+		triggered, stopSignal := s.p.checkStops(s.Cfg, tick, &s.trades)
 		if triggered {
 			signal = stopSignal
 		} else {
 			holdSec := time.Since(s.openTime).Seconds()
-			if s.cfg.SqueezeMaxHoldSec > 0 && holdSec >= float64(s.cfg.SqueezeMaxHoldSec) {
-				s.p.closePos(s.cfg, tick, "超时", &s.trades)
+			if s.Cfg.SqueezeMaxHoldSec > 0 && holdSec >= float64(s.Cfg.SqueezeMaxHoldSec) {
+				s.p.closePos(s.Cfg, tick, "超时", &s.trades)
 				pct := s.p.positionPct(tick)
 				signal = fmt.Sprintf("超时强平(持%.0fs %+.3f%%)", holdSec, pct*100)
 			}
@@ -117,19 +119,17 @@ func (s *Strategy) onPriceSqueezeBreakout(tick Tick, endTime time.Time) {
 	}
 
 	// ─── 优先级 2：开仓（仅在突破触发时入场）───
-	// Kalman 速度方向确认：KalmanVelThresh>0 时要求速度方向与突破方向一致
-	// 高杠杆下假突破代价极大，双重确认（ER + Kalman）显著提升胜率
-	kVelLongOK := s.cfg.KalmanVelThresh <= 0 || kVelPct > s.cfg.KalmanVelThresh
-	kVelShortOK := s.cfg.KalmanVelThresh <= 0 || kVelPct < -s.cfg.KalmanVelThresh
-	inCooldown := time.Since(s.p.lastTradeTime) < s.cfg.tradeCooldown()
-	if !s.p.inPosition() && !inCooldown && isBreakout && er > s.cfg.SqueezeConfirmER && signal == "" {
+	kVelLongOK := s.Cfg.KalmanVelThresh <= 0 || kVelPct > s.Cfg.KalmanVelThresh
+	kVelShortOK := s.Cfg.KalmanVelThresh <= 0 || kVelPct < -s.Cfg.KalmanVelThresh
+	inCooldown := time.Since(s.p.lastTradeTime) < s.Cfg.tradeCooldown()
+	if !s.p.inPosition() && !inCooldown && isBreakout && er > s.Cfg.SqueezeConfirmER && signal == "" {
 		if price > bbMid && kVelLongOK { // 向上突破 + Kalman 速度向上确认 → 做多
-			s.p.openPosVolAdjusted(s.cfg, dirLong, tick, 0.015, &s.trades) // avg volatility assumed
+			s.p.openPosVolAdjusted(s.Cfg, dirLong, tick, 0.015, &s.trades) // avg volatility assumed
 			s.openTime = time.Now()
 			signal = fmt.Sprintf("\033[32m挤压突破做多\033[0m (BB:%.3f%%→KC:%.3f%% ER:%.2f K:%+.4f%%)",
 				bbWidth, kcWidth, er, kVelPct*100)
 		} else if price <= bbMid && kVelShortOK { // 向下突破 + Kalman 速度向下确认 → 做空
-			s.p.openPosVolAdjusted(s.cfg, dirShort, tick, 0.015, &s.trades) // avg volatility assumed
+			s.p.openPosVolAdjusted(s.Cfg, dirShort, tick, 0.015, &s.trades) // avg volatility assumed
 			s.openTime = time.Now()
 			signal = fmt.Sprintf("\033[31m挤压突破做空\033[0m (BB:%.3f%%→KC:%.3f%% ER:%.2f K:%+.4f%%)",
 				bbWidth, kcWidth, er, kVelPct*100)
@@ -143,37 +143,37 @@ func (s *Strategy) onPriceSqueezeBreakout(tick Tick, endTime time.Time) {
 		if ok { return "\033[32m✓\033[0m" }
 		return "\033[31m✗\033[0m"
 	}
-	if signal == "" {
+	if signal == "" && !s.Cfg.Quiet {
 		if !s.p.inPosition() {
 			kDir := "↑多↓空"
-			if s.cfg.KalmanVelThresh > 0 {
-				if kVelPct > s.cfg.KalmanVelThresh {
+			if s.Cfg.KalmanVelThresh > 0 {
+				if kVelPct > s.Cfg.KalmanVelThresh {
 					kDir = "\033[32m↑做多\033[0m"
-				} else if kVelPct < -s.cfg.KalmanVelThresh {
+				} else if kVelPct < -s.Cfg.KalmanVelThresh {
 					kDir = "\033[31m↓做空\033[0m"
 				} else {
 					kDir = "\033[33m游走待确认\033[0m"
 				}
 			}
 			signal = fmt.Sprintf("等突破 挤压%s ER:%.2f>%.2f%s K方向:%s 冷却%s",
-				ck(inSqueeze), er, s.cfg.SqueezeConfirmER, ck(er > s.cfg.SqueezeConfirmER),
+				ck(inSqueeze), er, s.Cfg.SqueezeConfirmER, ck(er > s.Cfg.SqueezeConfirmER),
 				kDir, ck(!inCooldown))
 		} else {
 			pct := s.p.positionPct(tick)
 			holdSec := time.Since(s.openTime).Seconds()
 			var slPrice, tpPrice float64
 			if s.p.direction == dirLong {
-				slPrice = s.p.entryPrice * (1 - s.cfg.StopLoss)
-				tpPrice = s.p.entryPrice * (1 + s.cfg.TakeProfit)
+				slPrice = s.p.entryPrice * (1 - s.Cfg.StopLoss)
+				tpPrice = s.p.entryPrice * (1 + s.Cfg.TakeProfit)
 				signal = fmt.Sprintf("持多 止损$%.0f(差$%.0f) 止盈$%.0f(差$%.0f) 已持%.0fs/%ds 当前%+.3f%%",
 					slPrice, price-slPrice, tpPrice, tpPrice-price,
-					holdSec, s.cfg.SqueezeMaxHoldSec, pct*100)
+					holdSec, s.Cfg.SqueezeMaxHoldSec, pct*100)
 			} else {
-				slPrice = s.p.entryPrice * (1 + s.cfg.StopLoss)
-				tpPrice = s.p.entryPrice * (1 - s.cfg.TakeProfit)
+				slPrice = s.p.entryPrice * (1 + s.Cfg.StopLoss)
+				tpPrice = s.p.entryPrice * (1 - s.Cfg.TakeProfit)
 				signal = fmt.Sprintf("持空 止损$%.0f(差$%.0f) 止盈$%.0f(差$%.0f) 已持%.0fs/%ds 当前%+.3f%%",
 					slPrice, slPrice-price, tpPrice, price-tpPrice,
-					holdSec, s.cfg.SqueezeMaxHoldSec, pct*100)
+					holdSec, s.Cfg.SqueezeMaxHoldSec, pct*100)
 			}
 		}
 	}

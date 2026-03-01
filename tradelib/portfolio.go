@@ -1,4 +1,4 @@
-package main
+package tradelib
 
 import (
 	"fmt"
@@ -58,7 +58,6 @@ func (p *portfolio) totalEquity(cfg Config, tick Tick) float64 {
 	if !p.inPosition() {
 		return p.cash
 	}
-	// 计算浮盈浮亏时：多单按 Bid (卖方能接的价) 估值，空单按 Ask (买方被强平的价) 估值
 	currentExitPrice := tick.Bid1
 	if p.direction == dirShort {
 		currentExitPrice = tick.Ask1
@@ -83,27 +82,23 @@ func (p *portfolio) openPos(cfg Config, d posDir, tick Tick, trades *[]tradeReco
 }
 
 func (p *portfolio) openPosVolAdjusted(cfg Config, d posDir, tick Tick, volPct float64, trades *[]tradeRecord) {
-	// 开仓成交价推演：做多吃卖单 (Ask1)，做空吃买单 (Bid1)
 	entryPrice := tick.Ask1
 	if d == dirShort {
 		entryPrice = tick.Bid1
 	}
 
-	// 动态杠杆：波动率大时降低杠杆。假设默认杠杆是对应 1.5% 的日波动的基准值
 	actualLeverage := cfg.Leverage
 	if volPct > 0 {
-		// 基准波动 0.015 (1.5%)。如果此时波动达到 0.03 (3%)，杠杆折半
 		baseVol := 0.015
 		adj := baseVol / volPct
 		if adj > 2.0 {
-			adj = 2.0 // 最多翻两倍杠杆
+			adj = 2.0
 		} else if adj < 0.2 {
-			adj = 0.2 // 最少保留 20% 原杠杆
+			adj = 0.2
 		}
 		actualLeverage = cfg.Leverage * adj
 	}
 
-	// 开仓滑点（相对中盘价 Prc）已经隐含在盘口价差中，另外固定收取手续费 TradeFee
 	openFee := p.cash * actualLeverage * cfg.TradeFee
 	p.margin = p.cash - openFee
 	p.cash = 0
@@ -128,7 +123,6 @@ func (p *portfolio) openPosVolAdjusted(cfg Config, d posDir, tick Tick, volPct f
 }
 
 func (p *portfolio) closePos(cfg Config, tick Tick, reason string, trades *[]tradeRecord) {
-	// 平仓成交价推演：平多单卖给买一 (Bid1)，平空单买回卖一 (Ask1)
 	exitPrice := tick.Bid1
 	if p.direction == dirShort {
 		exitPrice = tick.Ask1
@@ -164,7 +158,6 @@ func (p *portfolio) checkStops(cfg Config, tick Tick, trades *[]tradeRecord) (tr
 	}
 	pct := p.positionPct(tick)
 
-	// 更新极端利润价
 	if p.direction == dirLong {
 		if tick.Bid1 > p.extremePrice || p.extremePrice == 0 {
 			p.extremePrice = tick.Bid1
@@ -175,7 +168,6 @@ func (p *portfolio) checkStops(cfg Config, tick Tick, trades *[]tradeRecord) (tr
 		}
 	}
 
-	// 优先触发吊灯（跟踪）止损
 	if cfg.TrailingStop > 0 {
 		if p.direction == dirLong {
 			drawdown := (p.extremePrice - tick.Bid1) / p.extremePrice
@@ -192,13 +184,11 @@ func (p *portfolio) checkStops(cfg Config, tick Tick, trades *[]tradeRecord) (tr
 		}
 	}
 
-	// 硬止损
 	if cfg.StopLoss > 0 && pct <= -cfg.StopLoss {
 		p.closePos(cfg, tick, "保护止损", trades)
 		return true, fmt.Sprintf("\033[31m硬止损(%.3f%%)\033[0m", pct*100)
 	}
 
-	// 固定止盈
 	if cfg.TakeProfit > 0 && pct >= cfg.TakeProfit {
 		p.closePos(cfg, tick, "固定止盈", trades)
 		return true, fmt.Sprintf("\033[32m止盈(+%.3f%%)\033[0m", pct*100)

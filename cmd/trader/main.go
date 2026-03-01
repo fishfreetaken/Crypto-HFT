@@ -8,6 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"biance/tradelib"
 )
 
 // ===== 主程序 =====
@@ -18,7 +20,7 @@ func main() {
 		cfgPath = os.Args[1]
 	}
 	var err error
-	appCfg, err = loadAppConfig(cfgPath)
+	appCfg, err := tradelib.LoadAppConfig(cfgPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			log.Printf("未找到 %s，使用默认配置\n", cfgPath)
@@ -30,18 +32,18 @@ func main() {
 	}
 
 	// 配置热重载 goroutine
-	reloadCh := make(chan AppConfig, 1)
+	reloadCh := make(chan tradelib.AppConfig, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go watchConfig(ctx, cfgPath, reloadCh)
+	go tradelib.WatchConfig(ctx, cfgPath, reloadCh)
 
 	// 退出信号监听
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
 	// 加载历史价格（所有策略共用同一份历史数据，各自维护独立副本）
-	historyF := loadHistoricalPricesFromDir(appCfg.DataDir, appCfg.LookbackHours)
-	history := convertHistoricalToTicks(historyF)
+	historyF := tradelib.LoadHistoricalPricesFromDir(appCfg.DataDir, appCfg.LookbackHours)
+	history := tradelib.ConvertHistoricalToTicks(historyF)
 	if len(history) > 0 {
 		log.Printf("历史数据：从 %s/ 加载 %d 条记录\n", appCfg.DataDir, len(history))
 	} else {
@@ -49,14 +51,14 @@ func main() {
 	}
 
 	// 初始化各策略
-	strategies := make([]*Strategy, len(appCfg.Strategies))
+	strategies := make([]*tradelib.Strategy, len(appCfg.Strategies))
 	for i, sc := range appCfg.Strategies {
-		strategies[i] = newStrategy(sc, historyF)
+		strategies[i] = tradelib.NewStrategy(sc, historyF)
 	}
 
 	startTime := time.Now()
-	endTime := startTime.Add(appCfg.tradeDuration())
-	var lastTick Tick
+	endTime := startTime.Add(appCfg.TradeDuration())
+	var lastTick tradelib.Tick
 	if len(history) > 0 {
 		lastTick = history[len(history)-1]
 	}
@@ -64,8 +66,8 @@ func main() {
 	// 启动信息
 	totalCapital := 0.0
 	for _, s := range strategies {
-		if !s.cfg.Disabled {
-			totalCapital += s.cfg.InitialCapital
+		if !s.Cfg.Disabled {
+			totalCapital += s.Cfg.InitialCapital
 		}
 	}
 	fmt.Println("========== BTC 多策略模拟交易 ==========")
@@ -73,26 +75,26 @@ func main() {
 		appCfg.Symbol, totalCapital, len(strategies))
 	for _, s := range strategies {
 		disabledTag := ""
-		if s.cfg.Disabled {
+		if s.Cfg.Disabled {
 			disabledTag = " \033[90m[禁用]\033[0m"
 		}
 		fmt.Printf("  [%-4s] 资金:$%.2f 杠杆:%.0fx 止损:%.1f%% 止盈:%.1f%% EMA(%d/%d/%d)%s\n",
-			s.cfg.Name, s.cfg.InitialCapital, s.cfg.Leverage,
-			s.cfg.StopLoss*100, s.cfg.TakeProfit*100,
-			s.cfg.EMAShort, s.cfg.EMALong, s.cfg.TrendPeriod, disabledTag)
+			s.Cfg.Name, s.Cfg.InitialCapital, s.Cfg.Leverage,
+			s.Cfg.StopLoss*100, s.Cfg.TakeProfit*100,
+			s.Cfg.EMAShort, s.Cfg.EMALong, s.Cfg.TrendPeriod, disabledTag)
 	}
-	fmt.Printf("运行时长: %v | 采样间隔: %v\n", appCfg.tradeDuration(), appCfg.sampleInterval())
+	fmt.Printf("运行时长: %v | 采样间隔: %v\n", appCfg.TradeDuration(), appCfg.SampleInterval())
 	fmt.Println("=========================================")
 
-	ticker := time.NewTicker(appCfg.sampleInterval())
+	ticker := time.NewTicker(appCfg.SampleInterval())
 	defer ticker.Stop()
-	timer := time.NewTimer(appCfg.tradeDuration())
+	timer := time.NewTimer(appCfg.TradeDuration())
 	defer timer.Stop()
 
 	for {
 		select {
 		case <-timer.C:
-			tick, err := fetchPrice()
+			tick, err := tradelib.FetchPrice()
 			if err != nil {
 				tick = lastTick
 				log.Printf("到期平仓获取价格失败，使用最后已知价格 %v\n", tick)
@@ -100,18 +102,18 @@ func main() {
 				lastTick = tick
 			}
 			for _, s := range strategies {
-				s.forceLiquidate(tick, "到期")
+				s.ForceLiquidate(tick, "到期")
 			}
-			printAllReports(strategies, startTime, lastTick)
+			tradelib.PrintAllReports(strategies, startTime, lastTick)
 			return
 
 		case sv := <-sig:
 			fmt.Printf("\n[%s] 收到退出信号 (%v)，正在结算...\n",
 				time.Now().Format("15:04:05"), sv)
 			for _, s := range strategies {
-				s.forceLiquidate(lastTick, "中断退出")
+				s.ForceLiquidate(lastTick, "中断退出")
 			}
-			printAllReports(strategies, startTime, lastTick)
+			tradelib.PrintAllReports(strategies, startTime, lastTick)
 			return
 
 		case newCfg := <-reloadCh:
@@ -119,9 +121,8 @@ func main() {
 			appCfg = newCfg
 			for _, st := range strategies {
 				for _, sc := range newCfg.Strategies {
-					if sc.Name == st.cfg.Name {
-						st.cfg = sc
-						st.warmupNeed = max(sc.TrendPeriod, sc.EMALong)
+					if sc.Name == st.Cfg.Name {
+						st.UpdateConfig(sc)
 						break
 					}
 				}
@@ -130,7 +131,7 @@ func main() {
 				time.Now().Format("15:04:05"), len(newCfg.Strategies))
 
 		case <-ticker.C:
-			tick, err := fetchPrice()
+			tick, err := tradelib.FetchPrice()
 			if err != nil {
 				log.Printf("获取价格失败: %v\n", err)
 				continue
@@ -139,7 +140,7 @@ func main() {
 			fmt.Printf("[%s] ── BTC $%.2f (B:%.2f A:%.2f) ────────────────\n",
 				time.Now().Format("15:04:05"), tick.Prc, tick.Bid1, tick.Ask1)
 			for _, s := range strategies {
-				s.onPrice(tick, endTime)
+				s.OnPrice(tick, endTime)
 			}
 		}
 	}

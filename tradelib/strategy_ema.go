@@ -1,4 +1,4 @@
-package main
+package tradelib
 
 import (
 	"fmt"
@@ -17,18 +17,20 @@ func (s *Strategy) onPriceEMA(tick Tick, endTime time.Time) {
 
 	// Kalman 滤波（预热期间也运行，积累状态估计）
 	kVelPct := 0.0
-	if s.cfg.KalmanR > 0 {
+	if s.Cfg.KalmanR > 0 {
 		p2 := price * price
 		_, vel := s.kf.step(price,
-			p2*s.cfg.KalmanQPos*s.cfg.KalmanQPos,
-			p2*s.cfg.KalmanQVel*s.cfg.KalmanQVel,
-			p2*s.cfg.KalmanR*s.cfg.KalmanR)
+			p2*s.Cfg.KalmanQPos*s.Cfg.KalmanQPos,
+			p2*s.Cfg.KalmanQVel*s.Cfg.KalmanQVel,
+			p2*s.Cfg.KalmanR*s.Cfg.KalmanR)
 		kVelPct = vel / price
 	}
 
 	if s.priceBuf.count < s.warmupNeed {
-		fmt.Printf("[%s] [%-4s] 数据采集中 $%.2f (%d/%d)\n",
-			time.Now().Format("15:04:05"), s.cfg.Name, price, s.priceBuf.count, s.warmupNeed)
+		if !s.Cfg.Quiet {
+			fmt.Printf("[%s] [%-4s] 数据采集中 $%.2f (%d/%d)\n",
+				time.Now().Format("15:04:05"), s.Cfg.Name, price, s.priceBuf.count, s.warmupNeed)
+		}
 		return
 	}
 
@@ -36,17 +38,17 @@ func (s *Strategy) onPriceEMA(tick Tick, endTime time.Time) {
 	shortEMA := s.emaShort.Value()
 	longEMA := s.emaLong.Value()
 	trendEMA := s.emaTrend.Value()
-	rsi := calcRSI(s.priceBuf, s.cfg.RSIPeriod)
+	rsi := calcRSI(s.priceBuf, s.Cfg.RSIPeriod)
 	signal := ""
 
 	// ─── 每 tick 计算全量滑动窗口指标 ───
 	er := 0.0
-	if s.cfg.ERPeriod > 0 {
-		er = calcER(s.priceBuf, s.cfg.ERPeriod)
+	if s.Cfg.ERPeriod > 0 {
+		er = calcER(s.priceBuf, s.Cfg.ERPeriod)
 	}
 	bbUpper, bbLower := 0.0, 0.0
-	if s.cfg.BBPeriod > 0 {
-		bbUpper, _, bbLower = calcBollingerBands(s.priceBuf, s.cfg.BBPeriod, s.cfg.BBStdDev)
+	if s.Cfg.BBPeriod > 0 {
+		bbUpper, _, bbLower = calcBollingerBands(s.priceBuf, s.Cfg.BBPeriod, s.Cfg.BBStdDev)
 	}
 
 	// 构建指标状态字符串（让用户一眼看清当前各指标状态）
@@ -59,10 +61,10 @@ func (s *Strategy) onPriceEMA(tick Tick, endTime time.Time) {
 		trendPos = "\033[31m↓趋\033[0m" // 价格在 trendEMA 下方（逆多/顺空）
 	}
 	bbTag := ""
-	if s.cfg.ERPeriod > 0 {
+	if s.Cfg.ERPeriod > 0 {
 		bbTag = fmt.Sprintf(" ER:%.2f", er)
 	}
-	if s.cfg.BBPeriod > 0 {
+	if s.Cfg.BBPeriod > 0 {
 		pricePos := "  中  "
 		if price <= bbLower {
 			pricePos = "\033[32m←下轨\033[0m"
@@ -81,7 +83,7 @@ func (s *Strategy) onPriceEMA(tick Tick, endTime time.Time) {
 		price, emaArrow, trendPos, rsi, bbTag, kColor, kVelPct*100)
 
 	// 更新峰值权益
-	equity := s.p.totalEquity(s.cfg, tick)
+	equity := s.p.totalEquity(s.Cfg, tick)
 	if equity > s.p.peakEquity {
 		s.p.peakEquity = equity
 	}
@@ -89,16 +91,16 @@ func (s *Strategy) onPriceEMA(tick Tick, endTime time.Time) {
 
 	// 波动熔断检测
 	inSafety := time.Now().Before(s.safetyUntil)
-	if !inSafety && s.priceBuf.count >= s.cfg.VolatilityPeriod {
-		vol := calcVolatility(s.priceBuf, s.cfg.VolatilityPeriod)
-		if vol >= s.cfg.VolatilityThreshold && drawdown >= s.cfg.SafetyDrawdown {
+	if !inSafety && s.priceBuf.count >= s.Cfg.VolatilityPeriod {
+		vol := calcVolatility(s.priceBuf, s.Cfg.VolatilityPeriod)
+		if vol >= s.Cfg.VolatilityThreshold && drawdown >= s.Cfg.SafetyDrawdown {
 			if s.p.inPosition() {
-				s.p.closePos(s.cfg, tick, "波动熔断", &s.trades)
+				s.p.closePos(s.Cfg, tick, "波动熔断", &s.trades)
 			}
-			s.safetyUntil = time.Now().Add(s.cfg.safetyCooldown())
+			s.safetyUntil = time.Now().Add(s.Cfg.safetyCooldown())
 			inSafety = true
 			fmt.Printf("[%s] [%-4s] \033[35m⚠ 波动熔断！\033[0m 波动:%.3f%% 回撤:%.2f%% → 冷静%v\n",
-				time.Now().Format("15:04:05"), s.cfg.Name, vol*100, drawdown*100, s.cfg.safetyCooldown())
+				time.Now().Format("15:04:05"), s.Cfg.Name, vol*100, drawdown*100, s.Cfg.safetyCooldown())
 		}
 	}
 
@@ -112,90 +114,81 @@ func (s *Strategy) onPriceEMA(tick Tick, endTime time.Time) {
 		return
 	}
 
-	inCooldown := time.Since(s.p.lastTradeTime) < s.cfg.tradeCooldown()
+	inCooldown := time.Since(s.p.lastTradeTime) < s.Cfg.tradeCooldown()
 
 	// 优先级 1：止损 / 止盈 / RSI 极值平仓（以及吊灯止损）
 	if s.p.inPosition() {
-		triggered, stopSignal := s.p.checkStops(s.cfg, tick, &s.trades)
+		triggered, stopSignal := s.p.checkStops(s.Cfg, tick, &s.trades)
 		if triggered {
 			signal = stopSignal
 		} else {
 			pct := s.p.positionPct(tick)
 			switch {
-			case s.p.direction == dirLong && rsi > s.cfg.RSIExitLong && pct > 0:
-				s.p.closePos(s.cfg, tick, "RSI超买", &s.trades)
+			case s.p.direction == dirLong && rsi > s.Cfg.RSIExitLong && pct > 0:
+				s.p.closePos(s.Cfg, tick, "RSI超买", &s.trades)
 				signal = fmt.Sprintf("RSI超买(%.1f)平多", rsi)
-			case s.p.direction == dirShort && rsi < s.cfg.RSIExitShort && pct > 0:
-				s.p.closePos(s.cfg, tick, "RSI超卖", &s.trades)
+			case s.p.direction == dirShort && rsi < s.Cfg.RSIExitShort && pct > 0:
+				s.p.closePos(s.Cfg, tick, "RSI超卖", &s.trades)
 				signal = fmt.Sprintf("RSI超卖(%.1f)平空", rsi)
 			}
 		}
 	}
 
 	// 优先级 2：开仓信号
-	// 【新方案 BBPeriod>0】EMA 定短期动量方向 + BB 回调定入场时机 + ER 过滤震荡市
-	//   - emaBullish/emaBearish 只看短/长 EMA 的相对位置，不强制要求价格在 trendEMA 哪侧
-	//   - trendEMA 用于区分"顺势"与"逆势"：顺势用正常 ER 门槛，逆势门槛提高 50%（更严格过滤）
-	//   - 这样在 BTC 牛市期间也能捕捉短期回撤的做空机会，实现多空双向均衡
-	// 【旧方案 BBPeriod=0】EMA 金叉/死叉 + 动量 ROC 过滤（向后兼容）
 	if !s.p.inPosition() && !inCooldown {
-		// Kalman 速度过滤：速度 < 阈值时认为市场处于随机游走，禁止开仓
-		kVelLong := s.cfg.KalmanR <= 0 || s.cfg.KalmanVelThresh <= 0 || kVelPct > s.cfg.KalmanVelThresh
-		kVelShort := s.cfg.KalmanR <= 0 || s.cfg.KalmanVelThresh <= 0 || kVelPct < -s.cfg.KalmanVelThresh
-		
+		kVelLong := s.Cfg.KalmanR <= 0 || s.Cfg.KalmanVelThresh <= 0 || kVelPct > s.Cfg.KalmanVelThresh
+		kVelShort := s.Cfg.KalmanR <= 0 || s.Cfg.KalmanVelThresh <= 0 || kVelPct < -s.Cfg.KalmanVelThresh
+
 		vol := 0.0
-		if s.priceBuf.count >= s.cfg.VolatilityPeriod {
-			vol = calcVolatility(s.priceBuf, s.cfg.VolatilityPeriod)
+		if s.priceBuf.count >= s.Cfg.VolatilityPeriod {
+			vol = calcVolatility(s.priceBuf, s.Cfg.VolatilityPeriod)
 		}
 
-		if s.cfg.BBPeriod > 0 {
-			// ─── 新方案：BB 回调 + 自适应 ER 过滤 + Kalman 速度确认（复用已计算的 er/bbUpper/bbLower）───
+		if s.Cfg.BBPeriod > 0 {
 			emaBullish := shortEMA > longEMA
 			emaBearish := shortEMA < longEMA
-			// 顺势入场：ER 门槛正常；逆势入场（价格在 trendEMA 反方向）：ER 门槛提高 50%
-			erLongThresh := s.cfg.ERThreshold
-			erShortThresh := s.cfg.ERThreshold
-			if price < trendEMA { erLongThresh *= 1.5 }  // 逆势做多，需更强趋势效率
-			if price > trendEMA { erShortThresh *= 1.5 } // 逆势做空，需更强趋势效率
-			erLongOK := s.cfg.ERThreshold <= 0 || er > erLongThresh
-			erShortOK := s.cfg.ERThreshold <= 0 || er > erShortThresh
+			erLongThresh := s.Cfg.ERThreshold
+			erShortThresh := s.Cfg.ERThreshold
+			if price < trendEMA { erLongThresh *= 1.5 }
+			if price > trendEMA { erShortThresh *= 1.5 }
+			erLongOK := s.Cfg.ERThreshold <= 0 || er > erLongThresh
+			erShortOK := s.Cfg.ERThreshold <= 0 || er > erShortThresh
 			trendTag := func(withTrend bool) string {
 				if withTrend { return "顺势" }
 				return "逆势"
 			}
 			switch {
-			case emaBullish && price <= bbLower && rsi < s.cfg.RSILongMax && erLongOK && kVelLong:
-				s.p.openPosVolAdjusted(s.cfg, dirLong, tick, vol, &s.trades)
+			case emaBullish && price <= bbLower && rsi < s.Cfg.RSILongMax && erLongOK && kVelLong:
+				s.p.openPosVolAdjusted(s.Cfg, dirLong, tick, vol, &s.trades)
 				signal = fmt.Sprintf("\033[32mBB回调做多(%s)\033[0m (BB下轨:%.0f ER:%.2f/%.2f K:%.4f%%)",
 					trendTag(price > trendEMA), bbLower, er, erLongThresh, kVelPct*100)
-			case emaBearish && price >= bbUpper && rsi > s.cfg.RSIShortMin && erShortOK && kVelShort:
-				s.p.openPosVolAdjusted(s.cfg, dirShort, tick, vol, &s.trades)
+			case emaBearish && price >= bbUpper && rsi > s.Cfg.RSIShortMin && erShortOK && kVelShort:
+				s.p.openPosVolAdjusted(s.Cfg, dirShort, tick, vol, &s.trades)
 				signal = fmt.Sprintf("\033[31mBB反弹做空(%s)\033[0m (BB上轨:%.0f ER:%.2f/%.2f K:%.4f%%)",
 					trendTag(price < trendEMA), bbUpper, er, erShortThresh, kVelPct*100)
 			}
 		} else if s.prevShortEMA > 0 && s.prevLongEMA > 0 {
-			// ─── 旧方案：EMA 金叉/死叉 + 动量/ER过滤 + Kalman 速度确认 ───
-			momentum := calcMomentum(s.priceBuf, s.cfg.MomentumPeriod)
-			momOK := s.cfg.MomentumPeriod == 0
-			erOK := s.cfg.ERThreshold <= 0 || er > s.cfg.ERThreshold
+			momentum := calcMomentum(s.priceBuf, s.Cfg.MomentumPeriod)
+			momOK := s.Cfg.MomentumPeriod == 0
+			erOK := s.Cfg.ERThreshold <= 0 || er > s.Cfg.ERThreshold
 			switch {
 			case s.prevShortEMA <= s.prevLongEMA && shortEMA > longEMA &&
-				rsi < s.cfg.RSILongMax && erOK &&
-				(momOK || (price > trendEMA && momentum > s.cfg.MomentumThreshold) ||
-					(price <= trendEMA && momentum > s.cfg.MomentumThreshold*1.5)) && kVelLong:
-				s.p.openPosVolAdjusted(s.cfg, dirLong, tick, vol, &s.trades)
+				rsi < s.Cfg.RSILongMax && erOK &&
+				(momOK || (price > trendEMA && momentum > s.Cfg.MomentumThreshold) ||
+					(price <= trendEMA && momentum > s.Cfg.MomentumThreshold*1.5)) && kVelLong:
+				s.p.openPosVolAdjusted(s.Cfg, dirLong, tick, vol, &s.trades)
 				signal = fmt.Sprintf("\033[32m金叉做多\033[0m (ER:%.2f 动量%+.3f%% K:%.4f%%)", er, momentum*100, kVelPct*100)
 			case s.prevShortEMA >= s.prevLongEMA && shortEMA < longEMA &&
-				rsi > s.cfg.RSIShortMin && erOK &&
-				(momOK || (price < trendEMA && momentum < -s.cfg.MomentumThreshold) ||
-					(price >= trendEMA && momentum < -s.cfg.MomentumThreshold*1.5)) && kVelShort:
-				s.p.openPosVolAdjusted(s.cfg, dirShort, tick, vol, &s.trades)
+				rsi > s.Cfg.RSIShortMin && erOK &&
+				(momOK || (price < trendEMA && momentum < -s.Cfg.MomentumThreshold) ||
+					(price >= trendEMA && momentum < -s.Cfg.MomentumThreshold*1.5)) && kVelShort:
+				s.p.openPosVolAdjusted(s.Cfg, dirShort, tick, vol, &s.trades)
 				signal = fmt.Sprintf("\033[31m死叉做空\033[0m (ER:%.2f 动量%+.3f%% K:%.4f%%)", er, momentum*100, kVelPct*100)
 			}
 		}
 	}
 	if inCooldown && !s.p.inPosition() && signal == "" {
-		remaining := s.cfg.tradeCooldown() - time.Since(s.p.lastTradeTime)
+		remaining := s.Cfg.tradeCooldown() - time.Since(s.p.lastTradeTime)
 		signal = fmt.Sprintf("冷却中(%v)", remaining.Round(time.Second))
 	}
 
@@ -205,60 +198,58 @@ func (s *Strategy) onPriceEMA(tick Tick, endTime time.Time) {
 		return "\033[31m✗\033[0m"
 	}
 	if signal == "" {
-		if !s.p.inPosition() && s.cfg.BBPeriod > 0 {
-			// 空仓：显示下一个入场方向的缺口条件
-			kVelLong := s.cfg.KalmanR <= 0 || s.cfg.KalmanVelThresh <= 0 || kVelPct > s.cfg.KalmanVelThresh
-			kVelShort := s.cfg.KalmanR <= 0 || s.cfg.KalmanVelThresh <= 0 || kVelPct < -s.cfg.KalmanVelThresh
+		if !s.p.inPosition() && s.Cfg.BBPeriod > 0 {
+			kVelLong := s.Cfg.KalmanR <= 0 || s.Cfg.KalmanVelThresh <= 0 || kVelPct > s.Cfg.KalmanVelThresh
+			kVelShort := s.Cfg.KalmanR <= 0 || s.Cfg.KalmanVelThresh <= 0 || kVelPct < -s.Cfg.KalmanVelThresh
 			emaBullish := shortEMA > longEMA
 			emaBearish := shortEMA < longEMA
 			if emaBullish {
-				erThresh := s.cfg.ERThreshold
+				erThresh := s.Cfg.ERThreshold
 				if price < trendEMA { erThresh *= 1.5 }
 				gap := price - bbLower
 				gapStr := fmt.Sprintf("\033[33m↓$%.0f\033[0m", gap)
 				if gap <= 0 { gapStr = fmt.Sprintf("\033[32m✓$%.0f\033[0m", bbLower) }
 				signal = fmt.Sprintf("等多 价%s RSI:%.1f<%g%s ER:%.2f>%.2f%s K%s",
-					gapStr, rsi, s.cfg.RSILongMax, ck(rsi < s.cfg.RSILongMax),
+					gapStr, rsi, s.Cfg.RSILongMax, ck(rsi < s.Cfg.RSILongMax),
 					er, erThresh, ck(er > erThresh), ck(kVelLong))
 			} else if emaBearish {
-				erThresh := s.cfg.ERThreshold
+				erThresh := s.Cfg.ERThreshold
 				if price > trendEMA { erThresh *= 1.5 }
 				gap := bbUpper - price
 				gapStr := fmt.Sprintf("\033[33m↑$%.0f\033[0m", gap)
 				if gap <= 0 { gapStr = fmt.Sprintf("\033[32m✓$%.0f\033[0m", bbUpper) }
 				signal = fmt.Sprintf("等空 价%s RSI:%.1f>%g%s ER:%.2f>%.2f%s K%s",
-					gapStr, rsi, s.cfg.RSIShortMin, ck(rsi > s.cfg.RSIShortMin),
+					gapStr, rsi, s.Cfg.RSIShortMin, ck(rsi > s.Cfg.RSIShortMin),
 					er, erThresh, ck(er > erThresh), ck(kVelShort))
 			}
-		} else if !s.p.inPosition() && s.cfg.BBPeriod == 0 {
+		} else if !s.p.inPosition() && s.Cfg.BBPeriod == 0 {
 			kDir := "↑多↓空"
-			if kVelPct > s.cfg.KalmanVelThresh {
+			if kVelPct > s.Cfg.KalmanVelThresh {
 				kDir = "\033[32m↑充能\033[0m"
-			} else if kVelPct < -s.cfg.KalmanVelThresh {
+			} else if kVelPct < -s.Cfg.KalmanVelThresh {
 				kDir = "\033[31m↓泄能\033[0m"
 			}
-			erThresh := s.cfg.ERThreshold
+			erThresh := s.Cfg.ERThreshold
 			signal = fmt.Sprintf("等金叉/死叉 ER:%.2f>%.2f%s K方向:%s",
 				er, erThresh, ck(er > erThresh), kDir)
 		} else if s.p.inPosition() {
-			// 持仓：显示止损/止盈/RSI平仓的触发价
 			pct := s.p.positionPct(tick)
 			var slPrice, tpPrice float64
 			if s.p.direction == dirLong {
-				slPrice = s.p.entryPrice * (1 - s.cfg.StopLoss)
-				tpPrice = s.p.entryPrice * (1 + s.cfg.TakeProfit)
+				slPrice = s.p.entryPrice * (1 - s.Cfg.StopLoss)
+				tpPrice = s.p.entryPrice * (1 + s.Cfg.TakeProfit)
 				signal = fmt.Sprintf("持多 止损$%.0f(差$%.0f) 止盈$%.0f(差$%.0f) RSI出:%.1f>%.0f%s 当前%+.3f%%",
 					slPrice, price-slPrice,
 					tpPrice, tpPrice-price,
-					rsi, s.cfg.RSIExitLong, ck(rsi > s.cfg.RSIExitLong && pct > 0),
+					rsi, s.Cfg.RSIExitLong, ck(rsi > s.Cfg.RSIExitLong && pct > 0),
 					pct*100)
 			} else {
-				slPrice = s.p.entryPrice * (1 + s.cfg.StopLoss)
-				tpPrice = s.p.entryPrice * (1 - s.cfg.TakeProfit)
+				slPrice = s.p.entryPrice * (1 + s.Cfg.StopLoss)
+				tpPrice = s.p.entryPrice * (1 - s.Cfg.TakeProfit)
 				signal = fmt.Sprintf("持空 止损$%.0f(差$%.0f) 止盈$%.0f(差$%.0f) RSI出:%.1f<%.0f%s 当前%+.3f%%",
 					slPrice, slPrice-price,
 					tpPrice, price-tpPrice,
-					rsi, s.cfg.RSIExitShort, ck(rsi < s.cfg.RSIExitShort && pct > 0),
+					rsi, s.Cfg.RSIExitShort, ck(rsi < s.Cfg.RSIExitShort && pct > 0),
 					pct*100)
 			}
 		}

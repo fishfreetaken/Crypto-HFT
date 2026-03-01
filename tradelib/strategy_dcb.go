@@ -1,4 +1,4 @@
-package main
+package tradelib
 
 import (
 	"fmt"
@@ -18,24 +18,26 @@ func (s *Strategy) onPriceDeadCatBounce(tick Tick, endTime time.Time) {
 
 	// Kalman 滤波（预热期间也运行）
 	kVelPct := 0.0
-	if s.cfg.KalmanR > 0 {
+	if s.Cfg.KalmanR > 0 {
 		p2 := price * price
 		_, vel := s.kf.step(price,
-			p2*s.cfg.KalmanQPos*s.cfg.KalmanQPos,
-			p2*s.cfg.KalmanQVel*s.cfg.KalmanQVel,
-			p2*s.cfg.KalmanR*s.cfg.KalmanR)
+			p2*s.Cfg.KalmanQPos*s.Cfg.KalmanQPos,
+			p2*s.Cfg.KalmanQVel*s.Cfg.KalmanQVel,
+			p2*s.Cfg.KalmanR*s.Cfg.KalmanR)
 		kVelPct = vel / price
 	}
 
 	n := s.priceBuf.count
 	if n < s.warmupNeed {
-		fmt.Printf("[%s] [%-5s] 数据采集中 $%.2f (%d/%d)\n",
-			time.Now().Format("15:04:05"), s.cfg.Name, price, n, s.warmupNeed)
+		if !s.Cfg.Quiet {
+			fmt.Printf("[%s] [%-5s] 数据采集中 $%.2f (%d/%d)\n",
+				time.Now().Format("15:04:05"), s.Cfg.Name, price, n, s.warmupNeed)
+		}
 		return
 	}
 
 	// ─── 滚动窗口分析 ───
-	window := s.cfg.DCBDropPeriod
+	window := s.Cfg.DCBDropPeriod
 	if n < window {
 		window = n
 	}
@@ -96,26 +98,26 @@ func (s *Strategy) onPriceDeadCatBounce(tick Tick, endTime time.Time) {
 		kColor = "\033[31m"
 	}
 	patternTag := fmt.Sprintf("跌%.3f%%(需≥%.1f%%) 反弹%.1f%%(需%.1f%%~%.0f%%)",
-		dropPct*100, s.cfg.DCBDropMinPct*100,
-		bounceRatio*100, s.cfg.DCBBounceMinPct/localLow*100*1000, s.cfg.DCBBounceMaxPct*100)
+		dropPct*100, s.Cfg.DCBDropMinPct*100,
+		bounceRatio*100, s.Cfg.DCBBounceMinPct/localLow*100*1000, s.Cfg.DCBBounceMaxPct*100)
 	indicators := fmt.Sprintf("$%.2f K:%s%+.4f%%\033[0m 窗口:%s",
 		price, kColor, kVelPct*100, patternTag)
 
 	signal := ""
-	equity := s.p.totalEquity(s.cfg, tick)
+	equity := s.p.totalEquity(s.Cfg, tick)
 	if equity > s.p.peakEquity {
 		s.p.peakEquity = equity
 	}
 
 	// ─── 优先级 1：平仓（止损 / 止盈 / 跟踪止损 / 超时）───
 	if s.p.inPosition() {
-		triggered, stopSignal := s.p.checkStops(s.cfg, tick, &s.trades)
+		triggered, stopSignal := s.p.checkStops(s.Cfg, tick, &s.trades)
 		if triggered {
 			signal = stopSignal
 		} else {
 			holdSec := time.Since(s.openTime).Seconds()
-			if s.cfg.DCBMaxHoldSec > 0 && holdSec >= float64(s.cfg.DCBMaxHoldSec) {
-				s.p.closePos(s.cfg, tick, "超时", &s.trades)
+			if s.Cfg.DCBMaxHoldSec > 0 && holdSec >= float64(s.Cfg.DCBMaxHoldSec) {
+				s.p.closePos(s.Cfg, tick, "超时", &s.trades)
 				pct := s.p.positionPct(tick)
 				signal = fmt.Sprintf("超时强平(持%.0fs %+.3f%%)", holdSec, pct*100)
 			}
@@ -123,20 +125,20 @@ func (s *Strategy) onPriceDeadCatBounce(tick Tick, endTime time.Time) {
 	}
 
 	// ─── 优先级 2：死猫做空入场 ───
-	isDrop := lowIdx > 0 && dropPct >= s.cfg.DCBDropMinPct
-	isBounce := bounceSize/localLow >= s.cfg.DCBBounceMinPct
-	isWeakBounce := bounceRatio <= s.cfg.DCBBounceMaxPct
+	isDrop := lowIdx > 0 && dropPct >= s.Cfg.DCBDropMinPct
+	isBounce := bounceSize/localLow >= s.Cfg.DCBBounceMinPct
+	isWeakBounce := bounceRatio <= s.Cfg.DCBBounceMaxPct
 	isPriceBelow := price < bounceHigh
-	kVelOK := s.cfg.KalmanVelThresh <= 0 || kVelPct < -s.cfg.KalmanVelThresh
-	inCooldown := time.Since(s.p.lastTradeTime) < s.cfg.tradeCooldown()
+	kVelOK := s.Cfg.KalmanVelThresh <= 0 || kVelPct < -s.Cfg.KalmanVelThresh
+	inCooldown := time.Since(s.p.lastTradeTime) < s.Cfg.tradeCooldown()
 
 	if !s.p.inPosition() && !inCooldown && signal == "" &&
 		isDrop && isBounce && isWeakBounce && isPriceBelow &&
-		s.dcbConsecDown >= s.cfg.DCBConfirmTicks && kVelOK {
-		s.p.openPosVolAdjusted(s.cfg, dirShort, tick, 0.015, &s.trades) // fallback average vol
+		s.dcbConsecDown >= s.Cfg.DCBConfirmTicks && kVelOK {
+		s.p.openPosVolAdjusted(s.Cfg, dirShort, tick, 0.015, &s.trades) // fallback average vol
 		s.openTime = time.Now()
 		signal = fmt.Sprintf("\033[31m死猫做空\033[0m 跌%.3f%% 反弹%.1f%%(≤%.0f%%) 确认%d格",
-			dropPct*100, bounceRatio*100, s.cfg.DCBBounceMaxPct*100, s.dcbConsecDown)
+			dropPct*100, bounceRatio*100, s.Cfg.DCBBounceMaxPct*100, s.dcbConsecDown)
 	}
 
 	// ─── 无信号时显示等待/持仓状态 ───
@@ -146,20 +148,20 @@ func (s *Strategy) onPriceDeadCatBounce(tick Tick, endTime time.Time) {
 		}
 		return "\033[31m✗\033[0m"
 	}
-	if signal == "" {
+	if signal == "" && !s.Cfg.Quiet {
 		if !s.p.inPosition() {
 			signal = fmt.Sprintf("等死猫 跌%s 反弹%s 弱%s 确认%d/%d格%s K%s 冷却%s",
 				ck(isDrop), ck(isBounce), ck(isWeakBounce),
-				s.dcbConsecDown, s.cfg.DCBConfirmTicks, ck(s.dcbConsecDown >= s.cfg.DCBConfirmTicks),
+				s.dcbConsecDown, s.Cfg.DCBConfirmTicks, ck(s.dcbConsecDown >= s.Cfg.DCBConfirmTicks),
 				ck(kVelOK), ck(!inCooldown))
 		} else {
 			pct := s.p.positionPct(tick)
 			holdSec := time.Since(s.openTime).Seconds()
-			slPrice := s.p.entryPrice * (1 + s.cfg.StopLoss)
-			tpPrice := s.p.entryPrice * (1 - s.cfg.TakeProfit)
+			slPrice := s.p.entryPrice * (1 + s.Cfg.StopLoss)
+			tpPrice := s.p.entryPrice * (1 - s.Cfg.TakeProfit)
 			signal = fmt.Sprintf("持空头 止损$%.0f(差$%.0f) 止盈$%.0f(差$%.0f) 已持%.0fs/%ds 当前%+.3f%%",
 				slPrice, slPrice-price, tpPrice, price-tpPrice,
-				holdSec, s.cfg.DCBMaxHoldSec, pct*100)
+				holdSec, s.Cfg.DCBMaxHoldSec, pct*100)
 		}
 	}
 

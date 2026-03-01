@@ -1,4 +1,4 @@
-package main
+package tradelib
 
 import (
 	"bufio"
@@ -21,11 +21,11 @@ type AppConfig struct {
 	Strategies        []Config `json:"strategies"`
 }
 
-func (a *AppConfig) sampleInterval() time.Duration {
+func (a *AppConfig) SampleInterval() time.Duration {
 	return time.Duration(a.SampleIntervalSec) * time.Second
 }
 
-func (a *AppConfig) tradeDuration() time.Duration {
+func (a *AppConfig) TradeDuration() time.Duration {
 	return time.Duration(a.TradeDurationMin) * time.Minute
 }
 
@@ -34,6 +34,7 @@ func (a *AppConfig) tradeDuration() time.Duration {
 type Config struct {
 	Name           string  `json:"name"`
 	Disabled       bool    `json:"disabled"` // true = 不执行且不输出；false（默认）= 正常运行
+	Quiet          bool    `json:"quiet"`    // true = 仅输出交易事件，抑制每tick状态行（回测用）
 	InitialCapital float64 `json:"initial_capital"`
 
 	Leverage     float64 `json:"leverage"`
@@ -87,29 +88,67 @@ type Config struct {
 	ProfitBoostWeight float64 `json:"profit_boost_weight"`
 
 	// 挤压突破策略（strategy_type = "squeeze_breakout"）
-	// 检测 BB 被 Keltner 通道包裹（盘整蓄力），突破时高杠杆跟入
-	SqueezeBBPeriod   int     `json:"squeeze_bb_period"`    // BB 计算窗口
-	SqueezeBBStdDev   float64 `json:"squeeze_bb_std_dev"`   // BB σ 倍数
-	SqueezeATRPeriod  int     `json:"squeeze_atr_period"`   // ATR / KC 计算窗口
-	SqueezeKCMult     float64 `json:"squeeze_kc_mult"`      // KC = EMA ± mult×ATR
-	SqueezeConfirmER  float64 `json:"squeeze_confirm_er"`   // 突破确认 ER 门槛（防假突破）
-	SqueezeMaxHoldSec int     `json:"squeeze_max_hold_sec"` // 最长持仓秒数（超时强平）
-	SqueezeBBWidthPct float64 `json:"squeeze_bb_width_pct"` // >0 时：用 BB 宽度/价格 < 阈值 判挤压（适合 5s 采样）；=0 时：用 BB⊂KC 经典判法
+	SqueezeBBPeriod   int     `json:"squeeze_bb_period"`
+	SqueezeBBStdDev   float64 `json:"squeeze_bb_std_dev"`
+	SqueezeATRPeriod  int     `json:"squeeze_atr_period"`
+	SqueezeKCMult     float64 `json:"squeeze_kc_mult"`
+	SqueezeConfirmER  float64 `json:"squeeze_confirm_er"`
+	SqueezeMaxHoldSec int     `json:"squeeze_max_hold_sec"`
+	SqueezeBBWidthPct float64 `json:"squeeze_bb_width_pct"`
 
 	// 死猫反弹策略（strategy_type = "dead_cat_bounce"）
-	// 急跌后弱反弹（≤DCBBounceMaxPct 回撤）结束时做空，等待续跌
-	DCBDropPeriod   int     `json:"dcb_drop_period"`    // 下跌回溯窗口(tick)
-	DCBDropMinPct   float64 `json:"dcb_drop_min_pct"`   // 有效急跌最小幅度
-	DCBBounceMinPct float64 `json:"dcb_bounce_min_pct"` // 反弹需达到的最小幅度（相对低点）
-	DCBBounceMaxPct float64 `json:"dcb_bounce_max_pct"` // 反弹超过总跌幅此比例则非死猫
-	DCBConfirmTicks int     `json:"dcb_confirm_ticks"`  // 确认反弹结束所需连续下跌tick数
-	DCBMaxHoldSec   int     `json:"dcb_max_hold_sec"`   // 超时强平秒数
+	DCBDropPeriod   int     `json:"dcb_drop_period"`
+	DCBDropMinPct   float64 `json:"dcb_drop_min_pct"`
+	DCBBounceMinPct float64 `json:"dcb_bounce_min_pct"`
+	DCBBounceMaxPct float64 `json:"dcb_bounce_max_pct"`
+	DCBConfirmTicks int     `json:"dcb_confirm_ticks"`
+	DCBMaxHoldSec   int     `json:"dcb_max_hold_sec"`
 
 	// 瀑布加速策略（strategy_type = "waterfall"）
-	// 连续N个tick均匀大幅下跌（止损连锁触发信号），高杠杆追入做空
-	WFConsecutiveTicks int     `json:"wf_consecutive_ticks"` // 需要连续下跌的tick数
-	WFMinVelPct        float64 `json:"wf_min_vel_pct"`       // 单tick平均最小下跌%
-	WFMaxHoldSec       int     `json:"wf_max_hold_sec"`      // 超时强平秒数
+	WFConsecutiveTicks int     `json:"wf_consecutive_ticks"`
+	WFMinVelPct        float64 `json:"wf_min_vel_pct"`
+	WFMaxHoldSec       int     `json:"wf_max_hold_sec"`
+
+	// 流动性陷阱策略（strategy_type = "liq_trap"）
+	// 博弈论：机构扫荡散户止损池后反向运动，跟随机构方向入场
+	LHTrapWindow       int     `json:"lh_trap_window"`        // 检测高低点的滚动窗口（ticks）
+	LHTrapSweepPct     float64 `json:"lh_trap_sweep_pct"`     // 高低点被突破的最小幅度（如 0.0015 = 0.15%）
+	LHTrapConfirmTicks int     `json:"lh_trap_confirm_ticks"` // 回归后确认的连续反向tick数
+	LHTrapMaxHoldSec   int     `json:"lh_trap_max_hold_sec"`  // 最大持仓秒数
+
+	// 趋势反转对冲策略（strategy_type = "trend_reversion_hedge"）
+	// A型：闪崩/闪涨均值回归
+	TRHFastWindowTicks   int     `json:"trh_fast_window_ticks"`
+	TRHFastMoveThreshold float64 `json:"trh_fast_move_threshold"`
+	TRHMajorRatioA       float64 `json:"trh_major_ratio_a"`
+	TRHMajorLeverageA    float64 `json:"trh_major_leverage_a"`
+	TRHHedgeLeverageA    float64 `json:"trh_hedge_leverage_a"`
+	TRHTotalTakeProfitA  float64 `json:"trh_total_take_profit_a"`
+	TRHTotalStopLossA    float64 `json:"trh_total_stop_loss_a"`
+	TRHLegExcessProfitA  float64 `json:"trh_leg_excess_profit_a"`
+	TRHMaxHoldSecA       int     `json:"trh_max_hold_sec_a"`
+
+	// B型：宏观趋势对冲
+	TRHSlowWindowTicks   int     `json:"trh_slow_window_ticks"`
+	TRHSlowMoveThreshold float64 `json:"trh_slow_move_threshold"`
+	TRHSlowVelMax        float64 `json:"trh_slow_vel_max"`
+	TRHERThreshold       float64 `json:"trh_er_threshold"`
+	TRHSlowStableTicks   int     `json:"trh_slow_stable_ticks"`
+	TRHStabilityVolThr   float64 `json:"trh_stability_vol_thr"`
+	TRHStabilityRangePct float64 `json:"trh_stability_range_pct"`
+	TRHERStableMax       float64 `json:"trh_er_stable_max"`
+	TRHKalmanVelStable   float64 `json:"trh_kalman_vel_stable"`
+	TRHMajorRatioB       float64 `json:"trh_major_ratio_b"`
+	TRHMajorLeverageB    float64 `json:"trh_major_leverage_b"`
+	TRHHedgeLeverageB    float64 `json:"trh_hedge_leverage_b"`
+	TRHTotalTakeProfitB  float64 `json:"trh_total_take_profit_b"`
+	TRHTotalStopLossB    float64 `json:"trh_total_stop_loss_b"`
+	TRHLegExcessProfitB  float64 `json:"trh_leg_excess_profit_b"`
+	TRHMajorStopLossB    float64 `json:"trh_major_stop_loss_b"`
+	TRHHedgeStopLoss     float64 `json:"trh_hedge_stop_loss"`
+	TRHMaxHoldHoursB     int     `json:"trh_max_hold_hours_b"`
+	TRHSoloTrailingStop  float64 `json:"trh_solo_trailing_stop"`
+	TRHCooldownSecB      int     `json:"trh_cooldown_sec_b"`
 }
 
 func (c *Config) tradeCooldown() time.Duration {
@@ -250,10 +289,29 @@ func defaultStrategies() []Config {
 			KalmanR:            0.00002,
 			KalmanVelThresh:    0.00005,
 		},
+		{
+			Name:               "流动性陷阱",
+			StrategyType:       "liq_trap",
+			InitialCapital:     1000.0,
+			Leverage:           6.0,
+			TradeFee:           0.0005,
+			StopLoss:           0.008,
+			TakeProfit:         0.020,
+			CooldownSec:        120,
+			LHTrapWindow:       80,
+			LHTrapSweepPct:     0.0015,
+			LHTrapConfirmTicks: 2,
+			LHTrapMaxHoldSec:   600,
+			KalmanQPos:         0.0003,
+			KalmanQVel:         0.00010,
+			KalmanR:            0.00008,
+			KalmanVelThresh:    0,
+		},
 	}
 }
 
-func loadAppConfig(path string) (AppConfig, error) {
+// LoadAppConfig 从 JSON 文件加载应用配置
+func LoadAppConfig(path string) (AppConfig, error) {
 	cfg := defaultAppConfig()
 	f, err := os.Open(path)
 	if err != nil {
@@ -269,10 +327,8 @@ func loadAppConfig(path string) (AppConfig, error) {
 	return cfg, nil
 }
 
-var appCfg AppConfig
-
-// watchConfig 每 2 分钟检查配置文件修改时间，有变化时通过 reloadCh 发送新配置。
-func watchConfig(ctx context.Context, path string, reloadCh chan<- AppConfig) {
+// WatchConfig 每 2 分钟检查配置文件修改时间，有变化时通过 reloadCh 发送新配置。
+func WatchConfig(ctx context.Context, path string, reloadCh chan<- AppConfig) {
 	const interval = 2 * time.Minute
 	var lastMod time.Time
 	if info, err := os.Stat(path); err == nil {
@@ -294,7 +350,7 @@ func watchConfig(ctx context.Context, path string, reloadCh chan<- AppConfig) {
 			if !info.ModTime().After(lastMod) {
 				continue
 			}
-			newCfg, err := loadAppConfig(path)
+			newCfg, err := LoadAppConfig(path)
 			if err != nil {
 				log.Printf("[配置监听] 重载失败: %v\n", err)
 				continue
@@ -329,7 +385,8 @@ func readPriceFile(path string) []float64 {
 	return prices
 }
 
-func loadHistoricalPricesFromDir(dataDir string, lookbackHours int) []float64 {
+// LoadHistoricalPricesFromDir 从数据目录加载历史价格（lookbackHours 小时）
+func LoadHistoricalPricesFromDir(dataDir string, lookbackHours int) []float64 {
 	now := time.Now()
 	start := now.Add(-time.Duration(lookbackHours) * time.Hour).Truncate(time.Hour)
 	var all []float64
