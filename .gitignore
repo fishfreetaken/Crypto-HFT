@@ -9,3 +9,12 @@
 /config.json
 /collector/data/
 /cmd/backtest/backtest_output*.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Generated output files
+python_strategies/output_*.txt
+python_strategies/adx_quick_test*.py.bak

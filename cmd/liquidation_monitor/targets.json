@@ -1,0 +1,14 @@
+{
+    "default_min_alert_usd": -1,
+    "symbols": {
+        "BTCUSDT": 10000,
+        "ETHUSDT": 10000,
+        "SOLUSDT": 5000,
+        "TRUMPUSDT": 5000,
+        "XRPUSDT": 5000,
+        "BNBUSDT": 10000,
+        "OPNUSDT": 5000,
+        "BARDUSDT": 5000,
+        "TRXUSDT": 10000
+    }
+}
