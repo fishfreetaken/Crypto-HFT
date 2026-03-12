@@ -8,9 +8,13 @@ def run_portfolio_strategy():
         'BTC-USD', 'ETH-USD', 'BNB-USD', 'SOL-USD', 'XRP-USD', 
         'DOGE-USD', 'ADA-USD', 'SHIB-USD', 'AVAX-USD', 'DOT-USD', 
         'LINK-USD', 'TRX-USD', 'BCH-USD', 'LTC-USD', 'NEAR-USD', 
-        'UNI-USD', 'APT-USD', 'XLM-USD', 'ATOM-USD', 'ICP-USD', 
-        'FIL-USD', 'STX-USD', 'ARB-USD', 'RNDR-USD', 'HBAR-USD', 
-        'INJ-USD', 'OP-USD', 'VET-USD', 'ALGO-USD', 'GRT-USD'
+        'XLM-USD', 'ATOM-USD', 'ICP-USD', 'FIL-USD', 'FET-USD', 
+        'ARB-USD', 'RENDER-USD', 'HBAR-USD', 'INJ-USD', 'OP-USD', 
+        'VET-USD', 'ALGO-USD', 'WLD-USD', 'AAVE-USD', 'CRV-USD',
+        'DASH-USD', 'EGLD-USD', 'ENJ-USD', 'EOS-USD', 'GALA-USD', 
+        'MANA-USD', 'MKR-USD', 'NEO-USD', 'RUNE-USD', 'SAND-USD', 
+        'SNX-USD', 'THETA-USD', 'ZEC-USD', 'XTZ-USD', 'LDO-USD', 
+        'CHZ-USD', 'KLAY-USD', 'XEC-USD', 'ZIL-USD', 'MINA-USD'
     ]
     
     print("---------------------------------------------------------")
@@ -261,7 +265,7 @@ def run_portfolio_strategy():
     plt.figure(figsize=(15, 8))
     plt.plot(equity_timestamps, equity_curve, color='#4CAF50', linewidth=2)
     plt.fill_between(equity_timestamps, initial_cap, equity_curve, where=(np.array(equity_curve) > initial_cap), facecolor='#4CAF50', alpha=0.15)
-    plt.title('Global Auto-Rotation Pyramiding (Single Active Trade across Top 30)', fontsize=14, pad=15, fontweight='bold', color='#FFD700')
+    plt.title('Global Auto-Rotation Pyramiding (Single Active Trade across Top 50)', fontsize=14, pad=15, fontweight='bold', color='#FFD700')
     plt.xlabel('Date Time', fontsize=12)
     plt.ylabel('Strategy Global Equity (USD)', fontsize=12)
     plt.grid(True, linestyle=(0, (5, 10)), alpha=0.3, color='#555555')

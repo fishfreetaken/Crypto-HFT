@@ -1,5 +1,5 @@
 """
-adx_optimizer_top30.py
+adx_optimizer_top50.py
 ======================
 Grid search optimizer for the ADX-filtered pyramiding strategy.
 Searches over: leverage, trailing_pct, pyramid_step_pct, adx_threshold
@@ -41,12 +41,16 @@ def run():
     end_date   = '2026-03-09'      # <-- adjust here
 
     tickers = [
-        'BTC-USD', 'ETH-USD', 'BNB-USD', 'SOL-USD', 'XRP-USD',
-        'DOGE-USD', 'ADA-USD', 'SHIB-USD', 'AVAX-USD', 'DOT-USD',
-        'LINK-USD', 'TRX-USD', 'BCH-USD', 'LTC-USD', 'NEAR-USD',
-        'UNI-USD', 'APT-USD', 'XLM-USD', 'ATOM-USD', 'ICP-USD',
-        'FIL-USD', 'STX-USD', 'ARB-USD', 'RNDR-USD', 'HBAR-USD',
-        'INJ-USD', 'OP-USD',  'VET-USD', 'ALGO-USD', 'GRT-USD'
+        'BTC-USD', 'ETH-USD', 'BNB-USD', 'SOL-USD', 'XRP-USD', 
+        'DOGE-USD', 'ADA-USD', 'SHIB-USD', 'AVAX-USD', 'DOT-USD', 
+        'LINK-USD', 'TRX-USD', 'BCH-USD', 'LTC-USD', 'NEAR-USD', 
+        'XLM-USD', 'ATOM-USD', 'ICP-USD', 'FIL-USD', 'FET-USD', 
+        'ARB-USD', 'RENDER-USD', 'HBAR-USD', 'INJ-USD', 'OP-USD', 
+        'VET-USD', 'ALGO-USD', 'WLD-USD', 'AAVE-USD', 'CRV-USD',
+        'DASH-USD', 'EGLD-USD', 'ENJ-USD', 'EOS-USD', 'GALA-USD', 
+        'MANA-USD', 'MKR-USD', 'NEO-USD', 'RUNE-USD', 'SAND-USD', 
+        'SNX-USD', 'THETA-USD', 'ZEC-USD', 'XTZ-USD', 'LDO-USD', 
+        'CHZ-USD', 'KLAY-USD', 'XEC-USD', 'ZIL-USD', 'MINA-USD'
     ]
 
     # ── Download data (once, in main process) ──────────────────
@@ -96,7 +100,7 @@ def run():
     res_df = pd.DataFrame(results, columns=cols)
 
     # ── Build markdown report ──────────────────────────────────
-    md  = "# Top 30 Crypto — ADX Filter Pyramiding Strategy Optimizer Report\n\n"
+    md  = "# Top 50 Crypto — ADX Filter Pyramiding Strategy Optimizer Report\n\n"
     md += "> **Strategy**: 1H EMA20/50 breakout + fractal pyramid compounding + trailing stop + ADX trend gate\n"
     md += "> **Period**: " + start_date + " ~ " + end_date + "\n"
     md += "> **Grid**: Leverage (10x-25x) | Trailing Stop (3%-5%) | Pyramid Step (1%-2%) | ADX Threshold (0/20/25/30)\n"
@@ -142,7 +146,7 @@ def run():
                    str(row['MaxDD']) + "% |\n")
         md += "\n"
 
-    out_md = 'top30_adx_optimizer_report.md'
+    out_md = 'top50_adx_optimizer_report.md'
     with open(out_md, 'w', encoding='utf-8') as f:
         f.write(md)
 
