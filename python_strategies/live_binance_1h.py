@@ -65,13 +65,13 @@ def parse_best_params(report_path):
     return params
 
 def check_sweep(st, tk):
-    if st['capital'] >= st['next_sweep_threshold']:
+    # 强化型获利回吐：只要账户资金超过初始分配的 1.5 倍，立即提取其中 80% 的超额利润
+    if st['capital'] >= st['initial_cap'] * 1.5:
         excess = st['capital'] - st['initial_cap']
-        locked = excess * 0.5
+        locked = excess * 0.8
         st['vault'] += locked
         st['capital'] -= locked
-        st['next_sweep_threshold'] = st['capital'] * 2.0
-        log_event(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🔒 [利润分配] {tk} 锁定 ${locked:.2f} 存入保险箱，累计保险: ${st['vault']:.2f}")
+        log_event(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🔒 [激进锁利] {tk} 锁定 ${locked:.2f} 存入保险箱，累计保险: ${st['vault']:.2f}")
 
 def compute_indicators(df):
     btc = df.copy()
@@ -117,6 +117,10 @@ def process_live_tick(tk, param, fee_rate=0.0004):
         st['unrealized'] = 0.0
         st['notional_usd'] = 0.0
     
+    if st['capital'] < st['initial_cap'] * 0.8:
+        # 吸血鬼熔断：亏损超过 20% 后强制停止交易该标的
+        return
+
     if st['cooldown_until'] and time.time() < st['cooldown_until']:
         return
     else:
@@ -127,8 +131,8 @@ def process_live_tick(tk, param, fee_rate=0.0004):
     pyramid_step_pct = param['step_pct']
     
     if st['state'] == 'WAITING':
-        # 放宽ADX限制到20，避免完全发呆
-        if _adx < 20.0: return
+        # 提升 ADX 门槛至 25，确保只在趋势确认强度较高时入场，减少震荡磨损
+        if _adx < 25.0: return
         
         # 保护机制：将移动止损硬性放宽，避免假突破扫损
         trailing_pct = max(param['trailing_pct'], 0.035) 
@@ -172,9 +176,14 @@ def process_live_tick(tk, param, fee_rate=0.0004):
             if _close < st['max_favorable_excursion']:
                 st['max_favorable_excursion'] = _close
             
-            # 使用放宽的止损计算
-            trailing_pct = max(param['trailing_pct'], 0.035) 
-            new_trail = st['max_favorable_excursion'] * (1 + trailing_pct)
+            # 强化型：阶梯锁利逻辑。浮盈越高，止损越紧，绝对锁定大单边利润
+            cur_roe = unrealized / st['notional_usd'] if st['notional_usd'] > 0 else 0
+            if cur_roe > 0.40: dynamic_trail = 0.008   # 40%以上浮盈，仅给0.8%撤回空间
+            elif cur_roe > 0.15: dynamic_trail = 0.015 # 15%以上浮盈，给1.5%空间
+            elif cur_roe > 0.07: dynamic_trail = 0.025 # 7%以上浮盈，给2.5%空间
+            else: dynamic_trail = max(param['trailing_pct'], 0.035) 
+            
+            new_trail = st['max_favorable_excursion'] * (1 + dynamic_trail)
             if new_trail < st['trailing_stop']:
                 st['trailing_stop'] = new_trail
                 
@@ -209,8 +218,14 @@ def process_live_tick(tk, param, fee_rate=0.0004):
             if _close > st['max_favorable_excursion']:
                 st['max_favorable_excursion'] = _close
                 
-            trailing_pct = max(param['trailing_pct'], 0.035)
-            new_trail = st['max_favorable_excursion'] * (1 - trailing_pct)
+            # 强化型：阶梯锁利逻辑
+            cur_roe = unrealized / st['notional_usd'] if st['notional_usd'] > 0 else 0
+            if cur_roe > 0.40: dynamic_trail = 0.008
+            elif cur_roe > 0.15: dynamic_trail = 0.015
+            elif cur_roe > 0.07: dynamic_trail = 0.025
+            else: dynamic_trail = max(param['trailing_pct'], 0.035)
+
+            new_trail = st['max_favorable_excursion'] * (1 - dynamic_trail)
             if new_trail > st['trailing_stop']:
                 st['trailing_stop'] = new_trail
                 
@@ -448,13 +463,18 @@ async def build_universe():
             if sym in b_tickers:
                 vol_dict[sym] = float(m['quoteVolume'])
                 
-        sorted_vols = sorted(vol_dict.items(), key=lambda x: x[1], reverse=True)[:30]
+        # 按照成交量排序并取前 50 名（扣除黑名单后取 30 名）
+        sorted_vols = sorted(vol_dict.items(), key=lambda x: x[1], reverse=True)
+        
+        # 排除“吸血鬼”币种：这些币种在宽幅震荡中极易产生假突破，导致高频止损磨损利润
+        BLACKLIST = ['FETUSDT', 'BCHUSDT', 'NEARUSDT', 'INJUSDT', 'ADAUSDT', 'LDOUSDT', 'WLDUSDT', 'DOTUSDT', 'XRPUSDT', 'ICPUSDT', 'FILUSDT', 'XECUSDT']
+        filtered_vols = [item for item in sorted_vols if item[0] not in BLACKLIST][:30]
         
         # 用户需求：无视大盘成交量权重，每个币种强制分配固定初始金额 30000 U
         fixed_allocation_per_ticker = 30000.0
         active_tk_list = []
         
-        for sym, vol in sorted_vols:
+        for sym, vol in filtered_vols:
             tk = sym
             active_tk_list.append(tk)
             allocated = fixed_allocation_per_ticker

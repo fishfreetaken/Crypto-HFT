@@ -18,16 +18,25 @@ pnl_by_ticker = {}
 try:
     with open(log_file, 'r', encoding='utf-8') as f:
         first_bal_found = False
+        ignore_snapshot = False
         for line in f:
+            # 核心过滤：跳过面板快照备份，防止重复计数
+            if "--- [每分钟轮询快照备份] ---" in line:
+                ignore_snapshot = True
+                continue
+            if ignore_snapshot and ("-----------------------" in line or "======" in line):
+                ignore_snapshot = False
+                continue
+            if ignore_snapshot: continue
+
             if "触点强平" in line or "目标止盈" in line:
                 match = re.search(r"\] (🚩 \[目标止盈\]|💥 \[触点强平\]) (\w+) .*?波动PnL: \$([\-\d\.]+)", line)
                 if not match:
                     match = re.search(r"(?:触点强平|目标止盈)\]?\s+(\w+).*?波动PnL:\s*\$([\-\d\.]+)", line)
                 
                 if match:
-                    tk = match.group(1) if len(match.groups())==2 else match.group(2)
-                    pnl_str = match.group(2) if len(match.groups())==2 else match.group(3)
-                    pnl = float(pnl_str)
+                    tk = match.group(2)
+                    pnl = float(match.group(3).replace(",", ""))
                     
                     trades_closed += 1
                     total_profit += pnl
@@ -39,7 +48,7 @@ try:
                     pnl_by_ticker[tk]['pnl'] += pnl
                     pnl_by_ticker[tk]['count'] += 1
 
-            if "利润分配" in line:
+            if "利润分配" in line or "自动止盈提款" in line or "激进锁利" in line:
                 match = re.search(r"锁定\s*\$([\d\.\,]+)", line)
                 if match:
                     total_vault += float(match.group(1).replace(",",""))
